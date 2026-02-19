@@ -1,0 +1,590 @@
+{
+  "annotations": {
+    "list": []
+  },
+  "editable": true,
+  "fiscalYearStartMonth": 0,
+  "graphTooltip": 1,
+  "id": null,
+  "links": [],
+  "panels": [
+    {
+      "collapsed": false,
+      "gridPos": { "h": 1, "w": 24, "x": 0, "y": 0 },
+      "id": 100,
+      "title": "總覽",
+      "type": "row"
+    },
+    {
+      "datasource": { "type": "prometheus", "uid": "${datasource}" },
+      "fieldConfig": {
+        "defaults": {
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              { "color": "green", "value": null },
+              { "color": "yellow", "value": 60 },
+              { "color": "red", "value": 85 }
+            ]
+          },
+          "unit": "percent",
+          "min": 0,
+          "max": 100
+        }
+      },
+      "gridPos": { "h": 6, "w": 6, "x": 0, "y": 1 },
+      "id": 1,
+      "options": {
+        "reduceOptions": { "calcs": ["lastNotNull"] },
+        "orientation": "auto",
+        "showThresholdLabels": false,
+        "showThresholdMarkers": true
+      },
+      "title": "CPU 使用率",
+      "type": "gauge",
+      "targets": [
+        {
+          "expr": "100 - (avg(rate(node_cpu_seconds_total{job=\"$job\",mode=\"idle\"}[5m])) * 100)",
+          "legendFormat": "CPU",
+          "refId": "A"
+        }
+      ]
+    },
+    {
+      "datasource": { "type": "prometheus", "uid": "${datasource}" },
+      "fieldConfig": {
+        "defaults": {
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              { "color": "green", "value": null },
+              { "color": "yellow", "value": 70 },
+              { "color": "red", "value": 90 }
+            ]
+          },
+          "unit": "percent",
+          "min": 0,
+          "max": 100
+        }
+      },
+      "gridPos": { "h": 6, "w": 6, "x": 6, "y": 1 },
+      "id": 2,
+      "options": {
+        "reduceOptions": { "calcs": ["lastNotNull"] },
+        "orientation": "auto",
+        "showThresholdLabels": false,
+        "showThresholdMarkers": true
+      },
+      "title": "記憶體使用率",
+      "type": "gauge",
+      "targets": [
+        {
+          "expr": "(1 - node_memory_MemAvailable_bytes{job=\"$job\"} / node_memory_MemTotal_bytes{job=\"$job\"}) * 100",
+          "legendFormat": "Memory",
+          "refId": "A"
+        }
+      ]
+    },
+    {
+      "datasource": { "type": "prometheus", "uid": "${datasource}" },
+      "fieldConfig": {
+        "defaults": {
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              { "color": "green", "value": null },
+              { "color": "yellow", "value": 70 },
+              { "color": "red", "value": 90 }
+            ]
+          },
+          "unit": "percent",
+          "min": 0,
+          "max": 100
+        }
+      },
+      "gridPos": { "h": 6, "w": 6, "x": 12, "y": 1 },
+      "id": 3,
+      "options": {
+        "reduceOptions": { "calcs": ["lastNotNull"] },
+        "orientation": "auto",
+        "showThresholdLabels": false,
+        "showThresholdMarkers": true
+      },
+      "title": "磁碟使用率",
+      "type": "gauge",
+      "targets": [
+        {
+          "expr": "max((1 - node_filesystem_avail_bytes{job=\"$job\",fstype!~\"tmpfs|devfs|autofs|nullfs|overlay|selfowner|fuse.*\",mountpoint!~\"/host_mnt.*|/run.*|/oldroot.*\"} / node_filesystem_size_bytes{job=\"$job\",fstype!~\"tmpfs|devfs|autofs|nullfs|overlay|selfowner|fuse.*\",mountpoint!~\"/host_mnt.*|/run.*|/oldroot.*\"}) * 100)",
+          "legendFormat": "Disk",
+          "refId": "A"
+        }
+      ]
+    },
+    {
+      "datasource": { "type": "prometheus", "uid": "${datasource}" },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "s",
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              { "color": "green", "value": null }
+            ]
+          }
+        }
+      },
+      "gridPos": { "h": 6, "w": 6, "x": 18, "y": 1 },
+      "id": 4,
+      "options": {
+        "reduceOptions": { "calcs": ["lastNotNull"] },
+        "colorMode": "value",
+        "graphMode": "none"
+      },
+      "title": "系統運行時間",
+      "type": "stat",
+      "targets": [
+        {
+          "expr": "time() - node_boot_time_seconds{job=\"$job\"}",
+          "legendFormat": "Uptime",
+          "refId": "A"
+        }
+      ]
+    },
+    {
+      "collapsed": false,
+      "gridPos": { "h": 1, "w": 24, "x": 0, "y": 7 },
+      "id": 101,
+      "title": "CPU",
+      "type": "row"
+    },
+    {
+      "datasource": { "type": "prometheus", "uid": "${datasource}" },
+      "fieldConfig": {
+        "defaults": {
+          "custom": {
+            "lineWidth": 1,
+            "fillOpacity": 20,
+            "spanNulls": false
+          },
+          "unit": "percent",
+          "min": 0,
+          "max": 100
+        }
+      },
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 8 },
+      "id": 10,
+      "options": {
+        "tooltip": { "mode": "multi" },
+        "legend": { "displayMode": "table", "placement": "bottom", "calcs": ["mean", "max"] }
+      },
+      "title": "CPU 使用率趨勢",
+      "type": "timeseries",
+      "targets": [
+        {
+          "expr": "100 - (avg(rate(node_cpu_seconds_total{job=\"$job\",mode=\"idle\"}[5m])) * 100)",
+          "legendFormat": "使用率",
+          "refId": "A"
+        }
+      ]
+    },
+    {
+      "datasource": { "type": "prometheus", "uid": "${datasource}" },
+      "fieldConfig": {
+        "defaults": {
+          "custom": {
+            "lineWidth": 1,
+            "fillOpacity": 20,
+            "stacking": { "mode": "normal" },
+            "spanNulls": false
+          },
+          "unit": "percent",
+          "min": 0,
+          "max": 100
+        }
+      },
+      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 8 },
+      "id": 11,
+      "options": {
+        "tooltip": { "mode": "multi" },
+        "legend": { "displayMode": "table", "placement": "bottom", "calcs": ["mean", "max"] }
+      },
+      "title": "CPU 各模式使用率",
+      "type": "timeseries",
+      "targets": [
+        {
+          "expr": "avg(rate(node_cpu_seconds_total{job=\"$job\",mode=\"user\"}[5m])) * 100",
+          "legendFormat": "user",
+          "refId": "A"
+        },
+        {
+          "expr": "avg(rate(node_cpu_seconds_total{job=\"$job\",mode=\"system\"}[5m])) * 100",
+          "legendFormat": "system",
+          "refId": "B"
+        },
+        {
+          "expr": "avg(rate(node_cpu_seconds_total{job=\"$job\",mode=\"iowait\"}[5m])) * 100",
+          "legendFormat": "iowait",
+          "refId": "C"
+        },
+        {
+          "expr": "avg(rate(node_cpu_seconds_total{job=\"$job\",mode=\"steal\"}[5m])) * 100",
+          "legendFormat": "steal",
+          "refId": "D"
+        },
+        {
+          "expr": "avg(rate(node_cpu_seconds_total{job=\"$job\",mode=\"nice\"}[5m])) * 100",
+          "legendFormat": "nice",
+          "refId": "E"
+        },
+        {
+          "expr": "avg(rate(node_cpu_seconds_total{job=\"$job\",mode=\"irq\"}[5m])) * 100",
+          "legendFormat": "irq",
+          "refId": "F"
+        },
+        {
+          "expr": "avg(rate(node_cpu_seconds_total{job=\"$job\",mode=\"softirq\"}[5m])) * 100",
+          "legendFormat": "softirq",
+          "refId": "G"
+        }
+      ]
+    },
+    {
+      "datasource": { "type": "prometheus", "uid": "${datasource}" },
+      "fieldConfig": {
+        "defaults": {
+          "custom": { "lineWidth": 1, "fillOpacity": 10, "spanNulls": false },
+          "unit": "short"
+        }
+      },
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 16 },
+      "id": 12,
+      "options": {
+        "tooltip": { "mode": "multi" },
+        "legend": { "displayMode": "table", "placement": "bottom", "calcs": ["mean", "max"] }
+      },
+      "title": "系統負載 (Load Average)",
+      "type": "timeseries",
+      "targets": [
+        {
+          "expr": "node_load1{job=\"$job\"}",
+          "legendFormat": "1 分鐘",
+          "refId": "A"
+        },
+        {
+          "expr": "node_load5{job=\"$job\"}",
+          "legendFormat": "5 分鐘",
+          "refId": "B"
+        },
+        {
+          "expr": "node_load15{job=\"$job\"}",
+          "legendFormat": "15 分鐘",
+          "refId": "C"
+        }
+      ]
+    },
+    {
+      "collapsed": false,
+      "gridPos": { "h": 1, "w": 24, "x": 0, "y": 24 },
+      "id": 102,
+      "title": "記憶體",
+      "type": "row"
+    },
+    {
+      "datasource": { "type": "prometheus", "uid": "${datasource}" },
+      "fieldConfig": {
+        "defaults": {
+          "custom": {
+            "lineWidth": 1,
+            "fillOpacity": 20,
+            "stacking": { "mode": "normal" },
+            "spanNulls": false
+          },
+          "unit": "bytes"
+        }
+      },
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 25 },
+      "id": 20,
+      "options": {
+        "tooltip": { "mode": "multi" },
+        "legend": { "displayMode": "table", "placement": "bottom", "calcs": ["mean", "max"] }
+      },
+      "title": "記憶體使用量",
+      "type": "timeseries",
+      "targets": [
+        {
+          "expr": "node_memory_MemTotal_bytes{job=\"$job\"} - node_memory_MemAvailable_bytes{job=\"$job\"}",
+          "legendFormat": "已使用",
+          "refId": "A"
+        },
+        {
+          "expr": "node_memory_MemAvailable_bytes{job=\"$job\"}",
+          "legendFormat": "可用",
+          "refId": "B"
+        }
+      ]
+    },
+    {
+      "datasource": { "type": "prometheus", "uid": "${datasource}" },
+      "fieldConfig": {
+        "defaults": {
+          "custom": {
+            "lineWidth": 1,
+            "fillOpacity": 20,
+            "stacking": { "mode": "normal" },
+            "spanNulls": false
+          },
+          "unit": "bytes"
+        }
+      },
+      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 25 },
+      "id": 21,
+      "options": {
+        "tooltip": { "mode": "multi" },
+        "legend": { "displayMode": "table", "placement": "bottom", "calcs": ["mean", "max"] }
+      },
+      "title": "記憶體細項",
+      "type": "timeseries",
+      "targets": [
+        {
+          "expr": "node_memory_MemTotal_bytes{job=\"$job\"} - node_memory_MemFree_bytes{job=\"$job\"} - node_memory_Buffers_bytes{job=\"$job\"} - node_memory_Cached_bytes{job=\"$job\"}",
+          "legendFormat": "應用程式",
+          "refId": "A"
+        },
+        {
+          "expr": "node_memory_Buffers_bytes{job=\"$job\"}",
+          "legendFormat": "Buffers",
+          "refId": "B"
+        },
+        {
+          "expr": "node_memory_Cached_bytes{job=\"$job\"}",
+          "legendFormat": "Cached",
+          "refId": "C"
+        },
+        {
+          "expr": "node_memory_MemFree_bytes{job=\"$job\"}",
+          "legendFormat": "Free",
+          "refId": "D"
+        }
+      ]
+    },
+    {
+      "datasource": { "type": "prometheus", "uid": "${datasource}" },
+      "fieldConfig": {
+        "defaults": {
+          "custom": { "lineWidth": 1, "fillOpacity": 20, "spanNulls": false },
+          "unit": "bytes"
+        }
+      },
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 33 },
+      "id": 22,
+      "options": {
+        "tooltip": { "mode": "multi" },
+        "legend": { "displayMode": "table", "placement": "bottom", "calcs": ["mean", "max"] }
+      },
+      "title": "Swap 使用量",
+      "type": "timeseries",
+      "targets": [
+        {
+          "expr": "node_memory_SwapTotal_bytes{job=\"$job\"} - node_memory_SwapFree_bytes{job=\"$job\"}",
+          "legendFormat": "Swap 已使用",
+          "refId": "A"
+        },
+        {
+          "expr": "node_memory_SwapFree_bytes{job=\"$job\"}",
+          "legendFormat": "Swap 可用",
+          "refId": "B"
+        }
+      ]
+    },
+    {
+      "collapsed": false,
+      "gridPos": { "h": 1, "w": 24, "x": 0, "y": 41 },
+      "id": 103,
+      "title": "磁碟",
+      "type": "row"
+    },
+    {
+      "datasource": { "type": "prometheus", "uid": "${datasource}" },
+      "fieldConfig": {
+        "defaults": {
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              { "color": "green", "value": null },
+              { "color": "yellow", "value": 70 },
+              { "color": "red", "value": 90 }
+            ]
+          },
+          "unit": "percent",
+          "min": 0,
+          "max": 100
+        },
+        "overrides": []
+      },
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 42 },
+      "id": 30,
+      "options": {
+        "reduceOptions": { "calcs": ["lastNotNull"] },
+        "orientation": "horizontal",
+        "showThresholdLabels": false,
+        "showThresholdMarkers": true,
+        "displayMode": "basic"
+      },
+      "title": "各磁碟分區使用率",
+      "type": "bargauge",
+      "targets": [
+        {
+          "expr": "(1 - node_filesystem_avail_bytes{job=\"$job\",fstype!~\"tmpfs|devfs|autofs|nullfs|overlay|selfowner|fuse.*\",mountpoint!~\"/host_mnt.*|/run.*|/oldroot.*\"} / node_filesystem_size_bytes{job=\"$job\",fstype!~\"tmpfs|devfs|autofs|nullfs|overlay|selfowner|fuse.*\",mountpoint!~\"/host_mnt.*|/run.*|/oldroot.*\"}) * 100",
+          "legendFormat": "{{mountpoint}}",
+          "refId": "A"
+        }
+      ]
+    },
+    {
+      "datasource": { "type": "prometheus", "uid": "${datasource}" },
+      "fieldConfig": {
+        "defaults": {
+          "custom": { "lineWidth": 1, "fillOpacity": 10, "spanNulls": false },
+          "unit": "Bps"
+        }
+      },
+      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 42 },
+      "id": 31,
+      "options": {
+        "tooltip": { "mode": "multi" },
+        "legend": { "displayMode": "table", "placement": "bottom", "calcs": ["mean", "max"] }
+      },
+      "title": "磁碟 I/O 速率",
+      "type": "timeseries",
+      "targets": [
+        {
+          "expr": "rate(node_disk_read_bytes_total{job=\"$job\"}[5m])",
+          "legendFormat": "{{device}} 讀取",
+          "refId": "A"
+        },
+        {
+          "expr": "rate(node_disk_written_bytes_total{job=\"$job\"}[5m])",
+          "legendFormat": "{{device}} 寫入",
+          "refId": "B"
+        }
+      ]
+    },
+    {
+      "collapsed": false,
+      "gridPos": { "h": 1, "w": 24, "x": 0, "y": 50 },
+      "id": 104,
+      "title": "網路",
+      "type": "row"
+    },
+    {
+      "datasource": { "type": "prometheus", "uid": "${datasource}" },
+      "fieldConfig": {
+        "defaults": {
+          "custom": { "lineWidth": 1, "fillOpacity": 20, "spanNulls": false },
+          "unit": "bps"
+        }
+      },
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 51 },
+      "id": 40,
+      "options": {
+        "tooltip": { "mode": "multi" },
+        "legend": { "displayMode": "table", "placement": "bottom", "calcs": ["mean", "max"] }
+      },
+      "title": "網路流量",
+      "type": "timeseries",
+      "targets": [
+        {
+          "expr": "rate(node_network_receive_bytes_total{job=\"$job\",device!~\"lo|lo0|veth.*|docker.*|br-.*\"}[5m]) * 8",
+          "legendFormat": "{{device}} 接收",
+          "refId": "A"
+        },
+        {
+          "expr": "rate(node_network_transmit_bytes_total{job=\"$job\",device!~\"lo|lo0|veth.*|docker.*|br-.*\"}[5m]) * 8",
+          "legendFormat": "{{device}} 傳送",
+          "refId": "B"
+        }
+      ]
+    },
+    {
+      "datasource": { "type": "prometheus", "uid": "${datasource}" },
+      "fieldConfig": {
+        "defaults": {
+          "custom": { "lineWidth": 1, "fillOpacity": 10, "spanNulls": false },
+          "unit": "pps"
+        }
+      },
+      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 51 },
+      "id": 41,
+      "options": {
+        "tooltip": { "mode": "multi" },
+        "legend": { "displayMode": "table", "placement": "bottom", "calcs": ["mean", "max"] }
+      },
+      "title": "網路封包速率",
+      "type": "timeseries",
+      "targets": [
+        {
+          "expr": "rate(node_network_receive_packets_total{job=\"$job\",device!~\"lo|lo0|veth.*|docker.*|br-.*\"}[5m])",
+          "legendFormat": "{{device}} 接收",
+          "refId": "A"
+        },
+        {
+          "expr": "rate(node_network_transmit_packets_total{job=\"$job\",device!~\"lo|lo0|veth.*|docker.*|br-.*\"}[5m])",
+          "legendFormat": "{{device}} 傳送",
+          "refId": "B"
+        }
+      ]
+    }
+  ],
+  "schemaVersion": 39,
+  "tags": ["node-exporter", "monitoring"],
+  "templating": {
+    "list": [
+      {
+        "current": {
+          "selected": false,
+          "text": "Prometheus",
+          "value": "Prometheus"
+        },
+        "hide": 0,
+        "includeAll": false,
+        "name": "datasource",
+        "options": [],
+        "query": "prometheus",
+        "refresh": 1,
+        "type": "datasource"
+      },
+      {
+        "current": {
+          "selected": false,
+          "text": "macos-exporter",
+          "value": "macos-exporter"
+        },
+        "description": "選擇資料來源：macOS 主機或 Linux Node Exporter",
+        "hide": 0,
+        "includeAll": false,
+        "label": "Job",
+        "name": "job",
+        "options": [
+          {
+            "selected": true,
+            "text": "macos-exporter",
+            "value": "macos-exporter"
+          },
+          {
+            "selected": false,
+            "text": "node-exporter",
+            "value": "node-exporter"
+          }
+        ],
+        "query": "macos-exporter,node-exporter",
+        "type": "custom"
+      }
+    ]
+  },
+  "time": { "from": "now-1h", "to": "now" },
+  "timepicker": {},
+  "timezone": "browser",
+  "title": "主機資源監控",
+  "uid": "node-exporter-overview",
+  "version": 2
+}
