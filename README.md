@@ -30,6 +30,7 @@ Tw_stock_server_monitor/
 │   └── main.py                           # 主程式
 ├── tests/
 │   ├── __init__.py
+│   ├── test_macos_exporter.py            # macOS Exporter 單元測試
 │   └── test_main.py                      # 主程式單元測試
 ├── .gitignore
 ├── LICENSE

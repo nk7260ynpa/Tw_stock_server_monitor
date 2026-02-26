@@ -114,7 +114,7 @@
       "type": "gauge",
       "targets": [
         {
-          "expr": "max((1 - node_filesystem_avail_bytes{job=\"$job\",fstype!~\"tmpfs|devfs|autofs|nullfs|overlay|selfowner|fuse.*\",mountpoint!~\"/host_mnt.*|/run.*|/oldroot.*\"} / node_filesystem_size_bytes{job=\"$job\",fstype!~\"tmpfs|devfs|autofs|nullfs|overlay|selfowner|fuse.*\",mountpoint!~\"/host_mnt.*|/run.*|/oldroot.*\"}) * 100)",
+          "expr": "max((1 - node_filesystem_avail_bytes{job=\"$job\",fstype!~\"tmpfs|devfs|autofs|nullfs|overlay|selfowner|fuse.*|hfs\",mountpoint!~\"/host_mnt.*|/run.*|/oldroot.*|/System/Volumes/(VM|Preboot|Update|xarts|iSCPreboot|Hardware)|/Volumes/.*\"} / node_filesystem_size_bytes{job=\"$job\",fstype!~\"tmpfs|devfs|autofs|nullfs|overlay|selfowner|fuse.*|hfs\",mountpoint!~\"/host_mnt.*|/run.*|/oldroot.*|/System/Volumes/(VM|Preboot|Update|xarts|iSCPreboot|Hardware)|/Volumes/.*\"}) * 100)",
           "legendFormat": "Disk",
           "refId": "A"
         }
@@ -434,7 +434,7 @@
       "type": "bargauge",
       "targets": [
         {
-          "expr": "(1 - node_filesystem_avail_bytes{job=\"$job\",fstype!~\"tmpfs|devfs|autofs|nullfs|overlay|selfowner|fuse.*\",mountpoint!~\"/host_mnt.*|/run.*|/oldroot.*\"} / node_filesystem_size_bytes{job=\"$job\",fstype!~\"tmpfs|devfs|autofs|nullfs|overlay|selfowner|fuse.*\",mountpoint!~\"/host_mnt.*|/run.*|/oldroot.*\"}) * 100",
+          "expr": "(1 - node_filesystem_avail_bytes{job=\"$job\",fstype!~\"tmpfs|devfs|autofs|nullfs|overlay|selfowner|fuse.*|hfs\",mountpoint!~\"/host_mnt.*|/run.*|/oldroot.*|/System/Volumes/(VM|Preboot|Update|xarts|iSCPreboot|Hardware)|/Volumes/.*\"} / node_filesystem_size_bytes{job=\"$job\",fstype!~\"tmpfs|devfs|autofs|nullfs|overlay|selfowner|fuse.*|hfs\",mountpoint!~\"/host_mnt.*|/run.*|/oldroot.*|/System/Volumes/(VM|Preboot|Update|xarts|iSCPreboot|Hardware)|/Volumes/.*\"}) * 100",
           "legendFormat": "{{mountpoint}}",
           "refId": "A"
         }

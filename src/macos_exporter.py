@@ -174,11 +174,49 @@ def _collect_memory():
     swap_free.set(swap.free)
 
 
+def _is_meaningful_partition(part):
+    """判斷磁碟分區是否為有意義的監控對象。
+
+    macOS 使用 APFS 容器，同一物理磁碟會被分為多個卷宗（volumes），
+    這些卷宗共享相同的儲存池，導致 psutil 報告重複的 total/free 值。
+    只保留真正有意義的掛載點，避免虛假的重複資料干擾監控。
+
+    Args:
+        part: psutil.disk_partitions() 回傳的分區物件。
+
+    Returns:
+        True 表示應該監控此分區，False 表示應跳過。
+    """
+    # 排除不需要的檔案系統類型
+    excluded_fstypes = ("devfs", "autofs", "nullfs")
+    if part.fstype in excluded_fstypes:
+        return False
+
+    # macOS APFS 系統卷宗過濾：只保留根目錄和資料卷宗
+    # 其他系統卷宗（VM、Preboot、Update、xarts、iSCPreboot、Hardware）
+    # 都共享同一個 APFS 容器的可用空間，監控它們會產生重複且無意義的數據
+    excluded_mountpoint_prefixes = (
+        "/System/Volumes/VM",
+        "/System/Volumes/Preboot",
+        "/System/Volumes/Update",
+        "/System/Volumes/xarts",
+        "/System/Volumes/iSCPreboot",
+        "/System/Volumes/Hardware",
+    )
+    if part.mountpoint.startswith(excluded_mountpoint_prefixes):
+        return False
+
+    return True
+
+
 def _collect_filesystem():
-    """收集檔案系統指標。"""
+    """收集檔案系統指標。
+
+    在 macOS 上，APFS 容器內的多個卷宗共享儲存池，
+    因此只監控有意義的掛載點（/、/System/Volumes/Data、外接磁碟等）。
+    """
     for part in psutil.disk_partitions(all=False):
-        # 排除不需要的檔案系統類型
-        if part.fstype in ("devfs", "autofs", "nullfs"):
+        if not _is_meaningful_partition(part):
             continue
         try:
             usage = psutil.disk_usage(part.mountpoint)
