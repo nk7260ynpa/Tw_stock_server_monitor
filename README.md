@@ -1,7 +1,8 @@
 # 台股伺服器監控 (Tw Stock Server Monitor)
 
 台股伺服器監控工具，內建 Grafana + Prometheus 監控系統，
-即時監控主機 CPU、記憶體、磁碟、網路等資源使用量。
+即時監控主機 CPU、記憶體、磁碟、網路等資源使用量，
+並持續檢查各 Tw_stock 微服務的健康狀態。
 
 支援 **macOS** 與 **Linux** 兩種部署環境。
 
@@ -45,34 +46,44 @@ Tw_stock_server_monitor/
 ### macOS 環境
 
 ```text
-┌──────────────┐    抓取指標    ┌──────────────────┐    psutil    ┌──────────┐
-│  Prometheus  │◄──────────────│  macOS Exporter   │◄────────────│  macOS   │
-│   :9090      │               │    :9101          │             │  主機系統  │
-└──────┬───────┘               └──────────────────┘             └──────────┘
-       │ 查詢
-┌──────▼───────┐
+                              ┌──────────────────┐    psutil    ┌──────────┐
+                     ┌────────│  macOS Exporter   │◄────────────│  macOS   │
+                     │        │    :9101          │             │  主機系統  │
+                     │        └──────────────────┘             └──────────┘
+┌──────────────┐     │
+│  Prometheus  │◄────┤
+│   :9090      │     │        ┌──────────────────┐    TCP check
+└──────┬───────┘     └────────│  Service Monitor  │──────────────► 各 Tw_stock 服務
+       │ 查詢                 │    :9102          │
+┌──────▼───────┐              └──────────────────┘
 │   Grafana    │
 │   :3000      │
 └──────────────┘
 ```
 
 - **macOS Exporter**：透過 psutil 收集 macOS 主機真實指標，在主機上直接執行
+- **Service Monitor**：在 Docker 中持續運行，定期 TCP 檢查各 Tw_stock 服務的健康狀態
 
 ### Linux 伺服器環境
 
 ```text
-┌──────────────┐    抓取指標    ┌────────────────┐    掛載磁碟    ┌──────────┐
-│  Prometheus  │◄──────────────│  Node Exporter  │◄──────────────│  Linux   │
-│   :9090      │               │    :9100        │   /proc /sys  │  主機系統  │
-└──────┬───────┘               └────────────────┘               └──────────┘
-       │ 查詢
-┌──────▼───────┐
+                              ┌────────────────┐    掛載磁碟    ┌──────────┐
+                     ┌────────│  Node Exporter  │◄──────────────│  Linux   │
+                     │        │    :9100        │   /proc /sys  │  主機系統  │
+                     │        └────────────────┘               └──────────┘
+┌──────────────┐     │
+│  Prometheus  │◄────┤
+│   :9090      │     │        ┌──────────────────┐    TCP check
+└──────┬───────┘     └────────│  Service Monitor  │──────────────► 各 Tw_stock 服務
+       │ 查詢                 │    :9102          │
+┌──────▼───────┐              └──────────────────┘
 │   Grafana    │
 │   :3000      │
 └──────────────┘
 ```
 
 - **Node Exporter**：在 Docker 中執行，掛載主機 /proc 與 /sys 收集指標
+- **Service Monitor**：在 Docker 中持續運行，定期 TCP 檢查各 Tw_stock 服務的健康狀態
 
 ## 環境需求
 
@@ -114,8 +125,11 @@ bash run.sh
 | Prometheus | 9090 | 指標儲存與查詢 |
 | Node Exporter | 9100 | Docker/Linux 主機指標收集 |
 | macOS Exporter | 9101 | macOS 主機指標收集 |
+| Service Monitor | 9102 | Tw_stock 服務健康檢查指標 |
 
 ## 監控指標
+
+### 主機資源監控
 
 儀表板包含以下監控面板：
 
@@ -124,6 +138,25 @@ bash run.sh
 - **記憶體**：使用量、細項分類（應用程式/Buffers/Cached/Free）、Swap 使用量
 - **磁碟**：各分區使用率、I/O 讀寫速率
 - **網路**：流量趨勢、封包速率
+
+### 服務健康檢查
+
+Service Monitor 持續檢查以下 Tw_stock 微服務的 TCP 連線狀態：
+
+| 服務 | 容器名稱 | 端口 |
+|------|---------|------|
+| Crawler | tw_stock_crawler | 6738 |
+| MySQL | tw_stock_database | 3306 |
+| DB Operating | tw_stock_db_operating | 8080 |
+| Indicator | tw-stock-indicator | 5001 |
+| Tools | tw_stock_tools | 8000 |
+| Dashboard | tw_stock_dashboard | 8002 |
+| Webpage | tw-stock-webpage | 7938 |
+
+暴露的 Prometheus 指標：
+
+- `tw_stock_service_up`：服務健康狀態（1=正常, 0=異常）
+- `tw_stock_service_response_time_seconds`：TCP 連線回應時間（秒）
 
 ## 其他操作
 

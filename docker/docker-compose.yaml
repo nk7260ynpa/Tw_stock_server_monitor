@@ -6,6 +6,15 @@ services:
     container_name: tw-stock-server-monitor
     volumes:
       - ../logs:/app/logs
+    ports:
+      - "9102:9102"
+    environment:
+      - MONITOR_METRICS_PORT=9102
+      - MONITOR_CHECK_INTERVAL=30
+      - MONITOR_CHECK_TIMEOUT=5
+    networks:
+      - default
+      - db_network
     restart: unless-stopped
 
   prometheus:
@@ -19,6 +28,9 @@ services:
     command:
       - "--config.file=/etc/prometheus/prometheus.yml"
       - "--storage.tsdb.retention.time=30d"
+    networks:
+      - default
+      - db_network
     restart: unless-stopped
 
   node-exporter:
@@ -54,6 +66,10 @@ services:
     restart: unless-stopped
     depends_on:
       - prometheus
+
+networks:
+  db_network:
+    external: true
 
 volumes:
   prometheus_data:
