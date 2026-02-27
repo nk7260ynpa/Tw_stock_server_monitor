@@ -30,6 +30,7 @@ MONITORED_SERVICES = [
     {"name": "tools", "host": "tw_stock_tools", "port": 8000},
     {"name": "dashboard", "host": "tw_stock_dashboard", "port": 8002},
     {"name": "webpage", "host": "tw-stock-webpage", "port": 7938},
+    {"name": "news", "host": "tw_stock_news", "port": 8003},
 ]
 
 # 建立獨立的 registry

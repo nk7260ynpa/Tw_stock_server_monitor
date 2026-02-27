@@ -152,6 +152,7 @@ Service Monitor 持續檢查以下 Tw_stock 微服務的 TCP 連線狀態：
 | Tools | tw_stock_tools | 8000 |
 | Dashboard | tw_stock_dashboard | 8002 |
 | Webpage | tw-stock-webpage | 7938 |
+| News | tw_stock_news | 8003 |
 
 暴露的 Prometheus 指標：
 

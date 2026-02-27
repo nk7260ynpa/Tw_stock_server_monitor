@@ -134,22 +134,22 @@ class TestMonitoredServices(unittest.TestCase):
             self.assertIsInstance(svc["port"], int)
 
     def test_expected_services_count(self):
-        """應監控 7 個服務。"""
-        self.assertEqual(len(MONITORED_SERVICES), 7)
+        """應監控 8 個服務。"""
+        self.assertEqual(len(MONITORED_SERVICES), 8)
 
     def test_expected_service_names(self):
         """應包含所有預期的服務名稱。"""
         names = {svc["name"] for svc in MONITORED_SERVICES}
         expected = {
             "crawler", "mysql", "db_operating", "indicator",
-            "tools", "dashboard", "webpage",
+            "tools", "dashboard", "webpage", "news",
         }
         self.assertEqual(names, expected)
 
     def test_expected_ports(self):
         """應包含所有預期的端口。"""
         ports = {svc["port"] for svc in MONITORED_SERVICES}
-        expected = {6738, 3306, 8080, 5001, 8000, 8002, 7938}
+        expected = {6738, 3306, 8080, 5001, 8000, 8002, 7938, 8003}
         self.assertEqual(ports, expected)
 
 
