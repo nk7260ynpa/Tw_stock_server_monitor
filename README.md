@@ -190,7 +190,7 @@ docker compose -f docker/docker-compose.yaml down -v
 ## 執行測試
 
 ```bash
-docker run --rm -v "$(pwd)":/app -w /app tw-stock-server-monitor:latest \
+docker run --rm -v "$(pwd)":/app -w /app nk7260ynpa/tw-stock-monitor:latest \
   python -m pytest tests/ -v
 ```
 
