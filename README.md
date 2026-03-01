@@ -36,7 +36,8 @@ Tw_stock_server_monitor/
 ├── .gitignore
 ├── LICENSE
 ├── README.md
-├── requirements.txt                      # Python 套件依賴
+├── pyproject.toml                        # Python 套件定義（PEP 621）
+├── requirements.txt                      # Docker 環境完整釘版依賴
 ├── run.sh                                # 啟動所有服務的執行腳本
 └── run_macos_exporter.sh                 # 單獨啟動 macOS Exporter
 ```
