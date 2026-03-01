@@ -397,8 +397,111 @@
       ]
     },
     {
+      "datasource": { "type": "prometheus", "uid": "${datasource}" },
+      "fieldConfig": {
+        "defaults": {
+          "custom": {
+            "align": "auto",
+            "cellOptions": { "type": "auto" },
+            "inspect": false
+          },
+          "unit": "bytes"
+        },
+        "overrides": [
+          {
+            "matcher": { "id": "byName", "options": "rank" },
+            "properties": [
+              { "id": "custom.width", "value": 60 },
+              { "id": "displayName", "value": "#" },
+              { "id": "unit", "value": "none" }
+            ]
+          },
+          {
+            "matcher": { "id": "byName", "options": "process_name" },
+            "properties": [
+              { "id": "displayName", "value": "程序名稱" },
+              { "id": "unit", "value": "none" },
+              { "id": "custom.width", "value": 280 }
+            ]
+          },
+          {
+            "matcher": { "id": "byName", "options": "pid" },
+            "properties": [
+              { "id": "displayName", "value": "PID" },
+              { "id": "unit", "value": "none" },
+              { "id": "custom.width", "value": 100 }
+            ]
+          },
+          {
+            "matcher": { "id": "byName", "options": "Value" },
+            "properties": [
+              { "id": "displayName", "value": "記憶體 (RSS)" },
+              { "id": "unit", "value": "bytes" },
+              { "id": "thresholds", "value": {
+                "mode": "absolute",
+                "steps": [
+                  { "color": "green", "value": null },
+                  { "color": "yellow", "value": 536870912 },
+                  { "color": "red", "value": 1073741824 }
+                ]
+              }},
+              { "id": "custom.cellOptions", "value": { "type": "color-background", "mode": "gradient" } }
+            ]
+          },
+          {
+            "matcher": { "id": "byName", "options": "Time" },
+            "properties": [
+              { "id": "custom.hidden", "value": true }
+            ]
+          }
+        ]
+      },
+      "gridPos": { "h": 10, "w": 24, "x": 0, "y": 41 },
+      "id": 23,
+      "options": {
+        "showHeader": true,
+        "sortBy": [
+          { "desc": true, "displayName": "記憶體 (RSS)" }
+        ],
+        "footer": {
+          "show": false
+        }
+      },
+      "title": "記憶體使用量前 15 名程序",
+      "description": "依據 RSS（Resident Set Size）排序的記憶體使用量前 15 名程序（僅 macOS Exporter 提供此指標）",
+      "type": "table",
+      "targets": [
+        {
+          "expr": "topk(15, node_top_memory_process_rss_bytes{job=\"macos-exporter\"})",
+          "legendFormat": "",
+          "refId": "A",
+          "instant": true,
+          "format": "table"
+        }
+      ],
+      "transformations": [
+        {
+          "id": "organize",
+          "options": {
+            "excludeByName": {
+              "__name__": true,
+              "instance": true,
+              "job": true
+            },
+            "indexByName": {
+              "rank": 0,
+              "process_name": 1,
+              "pid": 2,
+              "Value": 3
+            },
+            "renameByName": {}
+          }
+        }
+      ]
+    },
+    {
       "collapsed": false,
-      "gridPos": { "h": 1, "w": 24, "x": 0, "y": 41 },
+      "gridPos": { "h": 1, "w": 24, "x": 0, "y": 51 },
       "id": 103,
       "title": "磁碟",
       "type": "row"
@@ -421,7 +524,7 @@
         },
         "overrides": []
       },
-      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 42 },
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 52 },
       "id": 30,
       "options": {
         "reduceOptions": { "calcs": ["lastNotNull"] },
@@ -448,7 +551,7 @@
           "unit": "Bps"
         }
       },
-      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 42 },
+      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 52 },
       "id": 31,
       "options": {
         "tooltip": { "mode": "multi" },
@@ -471,7 +574,7 @@
     },
     {
       "collapsed": false,
-      "gridPos": { "h": 1, "w": 24, "x": 0, "y": 50 },
+      "gridPos": { "h": 1, "w": 24, "x": 0, "y": 60 },
       "id": 104,
       "title": "網路",
       "type": "row"
@@ -484,7 +587,7 @@
           "unit": "bps"
         }
       },
-      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 51 },
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 61 },
       "id": 40,
       "options": {
         "tooltip": { "mode": "multi" },
@@ -513,7 +616,7 @@
           "unit": "pps"
         }
       },
-      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 51 },
+      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 61 },
       "id": 41,
       "options": {
         "tooltip": { "mode": "multi" },

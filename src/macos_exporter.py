@@ -17,6 +17,7 @@ from prometheus_client import (
     Gauge,
     start_http_server,
 )
+from prometheus_client.core import GaugeMetricFamily
 
 from src.logger import setup_logger
 
@@ -124,6 +125,75 @@ net_transmit_packets = Counter(
 _prev_cpu_times = {}
 _prev_disk_io = {}
 _prev_net_io = {}
+
+# --- 程序記憶體使用量前 N 名 ---
+TOP_PROCESSES_COUNT = 15
+
+
+def _get_top_memory_processes(top_n=TOP_PROCESSES_COUNT):
+    """取得記憶體使用量最高的前 N 個程序。
+
+    遍歷系統所有程序，依照 RSS（Resident Set Size）排序，
+    回傳記憶體使用量最高的前 N 個程序資訊。
+
+    Args:
+        top_n: 要回傳的程序數量，預設為 TOP_PROCESSES_COUNT。
+
+    Returns:
+        包含 (name, pid, rss_bytes) 元組的列表，
+        依 rss_bytes 由大到小排序。
+    """
+    processes = []
+    for proc in psutil.process_iter(["pid", "name", "memory_info"]):
+        try:
+            info = proc.info
+            mem_info = info.get("memory_info")
+            if mem_info is None:
+                continue
+            processes.append((
+                info["name"] or "unknown",
+                info["pid"],
+                mem_info.rss,
+            ))
+        except (psutil.NoSuchProcess, psutil.AccessDenied, psutil.ZombieProcess):
+            continue
+    # 依 RSS 由大到小排序，取前 N 名
+    processes.sort(key=lambda x: x[2], reverse=True)
+    return processes[:top_n]
+
+
+class TopProcessesCollector:
+    """自訂 Prometheus Collector：暴露記憶體使用量前 N 名程序。
+
+    使用自訂 Collector（而非固定 Gauge）的原因：
+    - 每次抓取時動態生成指標，避免舊的 label 組合殘留
+    - 程序可能隨時啟動或終止，label 集合每次都不同
+    """
+
+    def describe(self):
+        """回傳空列表，表示此 Collector 不預先宣告指標。"""
+        return []
+
+    def collect(self):
+        """收集記憶體使用量前 N 名程序的指標。
+
+        Yields:
+            GaugeMetricFamily: 包含每個程序的 RSS 記憶體使用量（bytes），
+            以 process_name、pid 和 rank 作為 label。
+        """
+        gauge = GaugeMetricFamily(
+            "node_top_memory_process_rss_bytes",
+            "記憶體使用量前 N 名程序的 RSS（Resident Set Size），單位 bytes",
+            labels=["process_name", "pid", "rank"],
+        )
+        top_processes = _get_top_memory_processes()
+        for rank, (name, pid, rss) in enumerate(top_processes, start=1):
+            gauge.add_metric([name, str(pid), str(rank)], rss)
+        yield gauge
+
+
+# 註冊自訂 Collector
+registry.register(TopProcessesCollector())
 
 
 def _collect_boot_time():

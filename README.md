@@ -136,7 +136,7 @@ bash run.sh
 
 - **總覽**：CPU 使用率、記憶體使用率、磁碟使用率、系統運行時間
 - **CPU**：使用率趨勢、各模式使用率（user/system/iowait/nice/irq/softirq/steal）、系統負載
-- **記憶體**：使用量、細項分類（應用程式/Buffers/Cached/Free）、Swap 使用量
+- **記憶體**：使用量、細項分類（應用程式/Buffers/Cached/Free）、Swap 使用量、記憶體使用量前 15 名程序（表格）
 - **磁碟**：各分區使用率、I/O 讀寫速率
 - **網路**：流量趨勢、封包速率
 
@@ -159,6 +159,12 @@ Service Monitor 持續檢查以下 Tw_stock 微服務的 TCP 連線狀態：
 
 - `tw_stock_service_up`：服務健康狀態（1=正常, 0=異常）
 - `tw_stock_service_response_time_seconds`：TCP 連線回應時間（秒）
+
+### 程序記憶體使用量（macOS Exporter）
+
+macOS Exporter 額外暴露記憶體使用量前 15 名程序的指標：
+
+- `node_top_memory_process_rss_bytes`：程序 RSS 記憶體使用量（bytes），包含 labels：`process_name`、`pid`、`rank`
 
 ## 其他操作
 

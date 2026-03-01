@@ -1,13 +1,18 @@
 """macOS Exporter 單元測試。
 
-測試磁碟分區過濾邏輯，確保只監控有意義的掛載點。
+測試磁碟分區過濾邏輯與程序記憶體使用量收集功能，
+確保只監控有意義的掛載點，以及正確收集前 N 名程序資訊。
 """
 
 import unittest
 from collections import namedtuple
 from unittest.mock import MagicMock, patch
 
-from src.macos_exporter import _is_meaningful_partition
+from src.macos_exporter import (
+    TopProcessesCollector,
+    _get_top_memory_processes,
+    _is_meaningful_partition,
+)
 
 # 模擬 psutil 的 sdiskpart 結構
 MockPartition = namedtuple("MockPartition", ["device", "mountpoint", "fstype", "opts"])
@@ -197,6 +202,183 @@ class TestCollectFilesystem(unittest.TestCase):
         self.assertNotIn("/System/Volumes/xarts", call_args)
         self.assertNotIn("/System/Volumes/iSCPreboot", call_args)
         self.assertNotIn("/System/Volumes/Hardware", call_args)
+
+
+class TestGetTopMemoryProcesses(unittest.TestCase):
+    """測試 _get_top_memory_processes 函式。"""
+
+    @patch("src.macos_exporter.psutil")
+    def test_returns_top_n_by_rss(self, mock_psutil):
+        """應回傳依 RSS 排序的前 N 名程序。"""
+        # 建立 5 個模擬程序
+        mock_procs = []
+        rss_values = [100, 500, 200, 800, 300]
+        for i, rss in enumerate(rss_values):
+            proc = MagicMock()
+            mem_info = MagicMock()
+            mem_info.rss = rss
+            proc.info = {
+                "pid": 1000 + i,
+                "name": f"proc_{i}",
+                "memory_info": mem_info,
+            }
+            mock_procs.append(proc)
+
+        mock_psutil.process_iter.return_value = mock_procs
+        mock_psutil.NoSuchProcess = Exception
+        mock_psutil.AccessDenied = Exception
+        mock_psutil.ZombieProcess = Exception
+
+        result = _get_top_memory_processes(top_n=3)
+
+        self.assertEqual(len(result), 3)
+        # 驗證依 RSS 由大到小排序
+        self.assertEqual(result[0], ("proc_3", 1003, 800))
+        self.assertEqual(result[1], ("proc_1", 1001, 500))
+        self.assertEqual(result[2], ("proc_4", 1004, 300))
+
+    @patch("src.macos_exporter.psutil")
+    def test_handles_fewer_processes_than_top_n(self, mock_psutil):
+        """當系統程序數少於 top_n 時，應回傳所有程序。"""
+        proc = MagicMock()
+        mem_info = MagicMock()
+        mem_info.rss = 1024
+        proc.info = {"pid": 1, "name": "single", "memory_info": mem_info}
+        mock_psutil.process_iter.return_value = [proc]
+        mock_psutil.NoSuchProcess = Exception
+        mock_psutil.AccessDenied = Exception
+        mock_psutil.ZombieProcess = Exception
+
+        result = _get_top_memory_processes(top_n=15)
+
+        self.assertEqual(len(result), 1)
+        self.assertEqual(result[0], ("single", 1, 1024))
+
+    @patch("src.macos_exporter.psutil")
+    def test_skips_process_without_memory_info(self, mock_psutil):
+        """memory_info 為 None 的程序應被跳過。"""
+        proc_with_mem = MagicMock()
+        mem_info = MagicMock()
+        mem_info.rss = 2048
+        proc_with_mem.info = {
+            "pid": 10,
+            "name": "has_mem",
+            "memory_info": mem_info,
+        }
+        proc_without_mem = MagicMock()
+        proc_without_mem.info = {
+            "pid": 20,
+            "name": "no_mem",
+            "memory_info": None,
+        }
+        mock_psutil.process_iter.return_value = [
+            proc_with_mem,
+            proc_without_mem,
+        ]
+        mock_psutil.NoSuchProcess = Exception
+        mock_psutil.AccessDenied = Exception
+        mock_psutil.ZombieProcess = Exception
+
+        result = _get_top_memory_processes(top_n=15)
+
+        self.assertEqual(len(result), 1)
+        self.assertEqual(result[0], ("has_mem", 10, 2048))
+
+    @patch("src.macos_exporter.psutil")
+    def test_handles_access_denied(self, mock_psutil):
+        """遇到 AccessDenied 的程序應被跳過，不影響其他程序。"""
+        good_proc = MagicMock()
+        mem_info = MagicMock()
+        mem_info.rss = 4096
+        good_proc.info = {"pid": 1, "name": "good", "memory_info": mem_info}
+
+        # 模擬 AccessDenied 例外
+        class MockAccessDenied(Exception):
+            pass
+
+        bad_proc = MagicMock()
+        bad_proc.info = property(lambda self: None)
+        type(bad_proc).info = property(
+            lambda self: (_ for _ in ()).throw(MockAccessDenied())
+        )
+
+        mock_psutil.process_iter.return_value = [good_proc]
+        mock_psutil.NoSuchProcess = Exception
+        mock_psutil.AccessDenied = Exception
+        mock_psutil.ZombieProcess = Exception
+
+        result = _get_top_memory_processes(top_n=15)
+
+        self.assertEqual(len(result), 1)
+
+    @patch("src.macos_exporter.psutil")
+    def test_handles_none_process_name(self, mock_psutil):
+        """程序名稱為 None 時應替換為 'unknown'。"""
+        proc = MagicMock()
+        mem_info = MagicMock()
+        mem_info.rss = 512
+        proc.info = {"pid": 99, "name": None, "memory_info": mem_info}
+        mock_psutil.process_iter.return_value = [proc]
+        mock_psutil.NoSuchProcess = Exception
+        mock_psutil.AccessDenied = Exception
+        mock_psutil.ZombieProcess = Exception
+
+        result = _get_top_memory_processes(top_n=15)
+
+        self.assertEqual(len(result), 1)
+        self.assertEqual(result[0][0], "unknown")
+
+
+class TestTopProcessesCollector(unittest.TestCase):
+    """測試 TopProcessesCollector 自訂 Prometheus Collector。"""
+
+    @patch("src.macos_exporter._get_top_memory_processes")
+    def test_collect_yields_gauge_metric_family(self, mock_get_top):
+        """collect() 應產生包含程序指標的 GaugeMetricFamily。"""
+        mock_get_top.return_value = [
+            ("chrome", 123, 1073741824),
+            ("python", 456, 536870912),
+        ]
+
+        collector = TopProcessesCollector()
+        metrics = list(collector.collect())
+
+        self.assertEqual(len(metrics), 1)
+        metric = metrics[0]
+        self.assertEqual(metric.name, "node_top_memory_process_rss_bytes")
+        self.assertEqual(len(metric.samples), 2)
+
+    @patch("src.macos_exporter._get_top_memory_processes")
+    def test_collect_includes_correct_labels(self, mock_get_top):
+        """指標應包含 process_name、pid 和 rank labels。"""
+        mock_get_top.return_value = [
+            ("firefox", 789, 2147483648),
+        ]
+
+        collector = TopProcessesCollector()
+        metrics = list(collector.collect())
+        sample = metrics[0].samples[0]
+
+        self.assertEqual(sample.labels["process_name"], "firefox")
+        self.assertEqual(sample.labels["pid"], "789")
+        self.assertEqual(sample.labels["rank"], "1")
+        self.assertEqual(sample.value, 2147483648)
+
+    @patch("src.macos_exporter._get_top_memory_processes")
+    def test_collect_empty_when_no_processes(self, mock_get_top):
+        """沒有程序時應回傳空的 GaugeMetricFamily。"""
+        mock_get_top.return_value = []
+
+        collector = TopProcessesCollector()
+        metrics = list(collector.collect())
+
+        self.assertEqual(len(metrics), 1)
+        self.assertEqual(len(metrics[0].samples), 0)
+
+    def test_describe_returns_empty(self):
+        """describe() 應回傳空列表（不預先宣告指標）。"""
+        collector = TopProcessesCollector()
+        self.assertEqual(list(collector.describe()), [])
 
 
 if __name__ == "__main__":
