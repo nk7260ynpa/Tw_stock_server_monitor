@@ -27,6 +27,7 @@ MONITORED_SERVICES = [
     {"name": "mysql", "host": "tw_stock_database", "port": 3306},
     {"name": "db_operating", "host": "tw_stock_db_operating", "port": 8080},
     {"name": "indicator", "host": "tw-stock-indicator", "port": 5001},
+    {"name": "ml", "host": "tw-stock-ml", "port": 5002},
     {"name": "tools", "host": "tw_stock_tools", "port": 8000},
     {"name": "dashboard", "host": "tw_stock_dashboard", "port": 8002},
     {"name": "webpage", "host": "tw-stock-webpage", "port": 7938},

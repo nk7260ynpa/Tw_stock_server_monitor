@@ -150,6 +150,7 @@ Service Monitor 持續檢查以下 Tw_stock 微服務的 TCP 連線狀態：
 | MySQL | tw_stock_database | 3306 |
 | DB Operating | tw_stock_db_operating | 8080 |
 | Indicator | tw-stock-indicator | 5001 |
+| ML | tw-stock-ml | 5002 |
 | Tools | tw_stock_tools | 8000 |
 | Dashboard | tw_stock_dashboard | 8002 |
 | Webpage | tw-stock-webpage | 7938 |
