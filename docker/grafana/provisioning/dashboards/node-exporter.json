@@ -636,6 +636,216 @@
           "refId": "B"
         }
       ]
+    },
+    {
+      "datasource": { "type": "prometheus", "uid": "${datasource}" },
+      "fieldConfig": {
+        "defaults": {
+          "custom": {
+            "align": "auto",
+            "cellOptions": { "type": "auto" },
+            "inspect": false
+          },
+          "unit": "bytes"
+        },
+        "overrides": [
+          {
+            "matcher": { "id": "byName", "options": "rank" },
+            "properties": [
+              { "id": "custom.width", "value": 60 },
+              { "id": "displayName", "value": "#" },
+              { "id": "unit", "value": "none" }
+            ]
+          },
+          {
+            "matcher": { "id": "byName", "options": "process_name" },
+            "properties": [
+              { "id": "displayName", "value": "程序名稱" },
+              { "id": "unit", "value": "none" },
+              { "id": "custom.width", "value": 280 }
+            ]
+          },
+          {
+            "matcher": { "id": "byName", "options": "pid" },
+            "properties": [
+              { "id": "displayName", "value": "PID" },
+              { "id": "unit", "value": "none" },
+              { "id": "custom.width", "value": 100 }
+            ]
+          },
+          {
+            "matcher": { "id": "byName", "options": "Value" },
+            "properties": [
+              { "id": "displayName", "value": "總流量" },
+              { "id": "unit", "value": "decbytes" },
+              { "id": "thresholds", "value": {
+                "mode": "absolute",
+                "steps": [
+                  { "color": "green", "value": null },
+                  { "color": "yellow", "value": 10485760 },
+                  { "color": "red", "value": 104857600 }
+                ]
+              }},
+              { "id": "custom.cellOptions", "value": { "type": "color-background", "mode": "gradient" } }
+            ]
+          },
+          {
+            "matcher": { "id": "byName", "options": "Time" },
+            "properties": [
+              { "id": "custom.hidden", "value": true }
+            ]
+          }
+        ]
+      },
+      "gridPos": { "h": 10, "w": 24, "x": 0, "y": 69 },
+      "id": 42,
+      "options": {
+        "showHeader": true,
+        "sortBy": [
+          { "desc": true, "displayName": "總流量" }
+        ],
+        "footer": { "show": false }
+      },
+      "title": "網路流量前 15 名程序",
+      "description": "依據總流量（接收＋傳送）排序的網路流量前 15 名程序（僅 macOS Exporter 提供此指標）",
+      "type": "table",
+      "targets": [
+        {
+          "expr": "sort_desc(sum by (process_name, pid, rank) (node_top_network_process_bytes{job=\"macos-exporter\"}))",
+          "legendFormat": "",
+          "refId": "A",
+          "instant": true,
+          "format": "table"
+        }
+      ],
+      "transformations": [
+        {
+          "id": "organize",
+          "options": {
+            "excludeByName": {
+              "__name__": true,
+              "instance": true,
+              "job": true
+            },
+            "indexByName": {
+              "rank": 0,
+              "process_name": 1,
+              "pid": 2,
+              "Value": 3
+            },
+            "renameByName": {}
+          }
+        }
+      ]
+    },
+    {
+      "collapsed": false,
+      "gridPos": { "h": 1, "w": 24, "x": 0, "y": 79 },
+      "id": 105,
+      "title": "耗電量",
+      "type": "row"
+    },
+    {
+      "datasource": { "type": "prometheus", "uid": "${datasource}" },
+      "fieldConfig": {
+        "defaults": {
+          "custom": {
+            "align": "auto",
+            "cellOptions": { "type": "auto" },
+            "inspect": false
+          },
+          "unit": "none"
+        },
+        "overrides": [
+          {
+            "matcher": { "id": "byName", "options": "rank" },
+            "properties": [
+              { "id": "custom.width", "value": 60 },
+              { "id": "displayName", "value": "#" },
+              { "id": "unit", "value": "none" }
+            ]
+          },
+          {
+            "matcher": { "id": "byName", "options": "process_name" },
+            "properties": [
+              { "id": "displayName", "value": "程序名稱" },
+              { "id": "unit", "value": "none" },
+              { "id": "custom.width", "value": 280 }
+            ]
+          },
+          {
+            "matcher": { "id": "byName", "options": "pid" },
+            "properties": [
+              { "id": "displayName", "value": "PID" },
+              { "id": "unit", "value": "none" },
+              { "id": "custom.width", "value": 100 }
+            ]
+          },
+          {
+            "matcher": { "id": "byName", "options": "Value" },
+            "properties": [
+              { "id": "displayName", "value": "Energy Impact" },
+              { "id": "unit", "value": "none" },
+              { "id": "decimals", "value": 1 },
+              { "id": "thresholds", "value": {
+                "mode": "absolute",
+                "steps": [
+                  { "color": "green", "value": null },
+                  { "color": "yellow", "value": 10 },
+                  { "color": "red", "value": 50 }
+                ]
+              }},
+              { "id": "custom.cellOptions", "value": { "type": "color-background", "mode": "gradient" } }
+            ]
+          },
+          {
+            "matcher": { "id": "byName", "options": "Time" },
+            "properties": [
+              { "id": "custom.hidden", "value": true }
+            ]
+          }
+        ]
+      },
+      "gridPos": { "h": 10, "w": 24, "x": 0, "y": 80 },
+      "id": 50,
+      "options": {
+        "showHeader": true,
+        "sortBy": [
+          { "desc": true, "displayName": "Energy Impact" }
+        ],
+        "footer": { "show": false }
+      },
+      "title": "耗電量前 15 名程序",
+      "description": "依據 macOS Energy Impact 排序的耗電量前 15 名程序（僅 macOS Exporter 提供此指標）",
+      "type": "table",
+      "targets": [
+        {
+          "expr": "topk(15, node_top_power_process_energy{job=\"macos-exporter\"})",
+          "legendFormat": "",
+          "refId": "A",
+          "instant": true,
+          "format": "table"
+        }
+      ],
+      "transformations": [
+        {
+          "id": "organize",
+          "options": {
+            "excludeByName": {
+              "__name__": true,
+              "instance": true,
+              "job": true
+            },
+            "indexByName": {
+              "rank": 0,
+              "process_name": 1,
+              "pid": 2,
+              "Value": 3
+            },
+            "renameByName": {}
+          }
+        }
+      ]
     }
   ],
   "schemaVersion": 39,
