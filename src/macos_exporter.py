@@ -8,6 +8,7 @@
 
 import logging
 import os
+import subprocess
 import time
 
 import psutil
@@ -126,8 +127,9 @@ _prev_cpu_times = {}
 _prev_disk_io = {}
 _prev_net_io = {}
 
-# --- 程序記憶體使用量前 N 名 ---
+# --- 程序排行榜共用常數 ---
 TOP_PROCESSES_COUNT = 15
+SUBPROCESS_TIMEOUT = 30
 
 
 def _get_top_memory_processes(top_n=TOP_PROCESSES_COUNT):
@@ -192,8 +194,267 @@ class TopProcessesCollector:
         yield gauge
 
 
-# 註冊自訂 Collector
+# --- 程序網路流量前 N 名 ---
+
+logger = logging.getLogger(__name__)
+
+
+def _get_top_network_processes(top_n=TOP_PROCESSES_COUNT):
+    """透過 nettop 取得網路流量最高的前 N 個程序。
+
+    執行 macOS 內建的 nettop 命令，解析 CSV 輸出取得每個程序的
+    bytes_in 與 bytes_out，依總流量（bytes_in + bytes_out）排序。
+
+    Args:
+        top_n: 要回傳的程序數量，預設為 TOP_PROCESSES_COUNT。
+
+    Returns:
+        包含 (name, pid, bytes_in, bytes_out) 元組的列表，
+        依總流量由大到小排序。若命令執行失敗則回傳空列表。
+    """
+    try:
+        result = subprocess.run(
+            [
+                "nettop", "-P", "-L", "1",
+                "-J", "bytes_in,bytes_out",
+                "-x",
+                "-t", "wifi",
+                "-t", "wired",
+            ],
+            capture_output=True,
+            text=True,
+            timeout=SUBPROCESS_TIMEOUT,
+        )
+    except subprocess.TimeoutExpired:
+        logger.warning("nettop 命令執行逾時（%d 秒）", SUBPROCESS_TIMEOUT)
+        return []
+    except FileNotFoundError:
+        logger.warning("找不到 nettop 命令，可能不在 macOS 環境")
+        return []
+    except OSError as e:
+        logger.warning("執行 nettop 時發生作業系統錯誤: %s", e)
+        return []
+
+    return _parse_nettop_output(result.stdout, top_n)
+
+
+def _parse_nettop_output(output, top_n=TOP_PROCESSES_COUNT):
+    """解析 nettop 的 CSV 輸出。
+
+    nettop 輸出格式範例：
+        ,bytes_in,bytes_out,
+        Chrome.12345,1024,2048,
+        Safari.67890,512,256,
+
+    Args:
+        output: nettop 命令的標準輸出字串。
+        top_n: 要回傳的程序數量。
+
+    Returns:
+        包含 (name, pid, bytes_in, bytes_out) 元組的列表，
+        依總流量由大到小排序。
+    """
+    processes = []
+    for line in output.strip().splitlines():
+        line = line.strip()
+        if not line or line.startswith(","):
+            # 跳過空行和標題行（以逗號開頭）
+            continue
+        parts = line.rstrip(",").split(",")
+        if len(parts) < 3:
+            continue
+        identity = parts[0]
+        try:
+            bytes_in = int(parts[1])
+            bytes_out = int(parts[2])
+        except (ValueError, IndexError):
+            continue
+        # 解析 process_name.pid 格式
+        dot_idx = identity.rfind(".")
+        if dot_idx == -1:
+            continue
+        name = identity[:dot_idx]
+        pid_str = identity[dot_idx + 1:]
+        try:
+            pid = int(pid_str)
+        except ValueError:
+            continue
+        if bytes_in == 0 and bytes_out == 0:
+            continue
+        processes.append((name, pid, bytes_in, bytes_out))
+
+    processes.sort(key=lambda x: x[2] + x[3], reverse=True)
+    return processes[:top_n]
+
+
+class TopNetworkProcessesCollector:
+    """自訂 Prometheus Collector：暴露網路流量前 N 名程序。
+
+    透過 nettop 命令取得 per-process 網路流量，
+    每次抓取時動態生成指標，避免舊的 label 組合殘留。
+    """
+
+    def describe(self):
+        """回傳空列表，表示此 Collector 不預先宣告指標。"""
+        return []
+
+    def collect(self):
+        """收集網路流量前 N 名程序的指標。
+
+        Yields:
+            GaugeMetricFamily: 包含每個程序的網路流量（bytes），
+            以 process_name、pid、rank 和 direction（in/out）作為 label。
+        """
+        gauge = GaugeMetricFamily(
+            "node_top_network_process_bytes",
+            "網路流量前 N 名程序的傳輸量，單位 bytes",
+            labels=["process_name", "pid", "rank", "direction"],
+        )
+        top_processes = _get_top_network_processes()
+        for rank, (name, pid, bytes_in, bytes_out) in enumerate(
+            top_processes, start=1
+        ):
+            gauge.add_metric(
+                [name, str(pid), str(rank), "in"], bytes_in
+            )
+            gauge.add_metric(
+                [name, str(pid), str(rank), "out"], bytes_out
+            )
+        yield gauge
+
+
+# --- 程序耗電量前 N 名 ---
+
+
+def _get_top_power_processes(top_n=TOP_PROCESSES_COUNT):
+    """透過 top 命令取得耗電量最高的前 N 個程序。
+
+    執行 macOS 內建的 top 命令（-l 2 取第二次採樣），
+    解析 power 欄位取得每個程序的 energy impact 值。
+
+    Args:
+        top_n: 要回傳的程序數量，預設為 TOP_PROCESSES_COUNT。
+
+    Returns:
+        包含 (name, pid, power) 元組的列表，
+        依 power 由大到小排序。若命令執行失敗則回傳空列表。
+    """
+    try:
+        result = subprocess.run(
+            [
+                "top", "-l", "2",
+                "-n", str(top_n + 5),
+                "-stats", "pid,command,power",
+                "-o", "power",
+            ],
+            capture_output=True,
+            text=True,
+            timeout=SUBPROCESS_TIMEOUT,
+        )
+    except subprocess.TimeoutExpired:
+        logger.warning("top 命令執行逾時（%d 秒）", SUBPROCESS_TIMEOUT)
+        return []
+    except FileNotFoundError:
+        logger.warning("找不到 top 命令")
+        return []
+    except OSError as e:
+        logger.warning("執行 top 時發生作業系統錯誤: %s", e)
+        return []
+
+    return _parse_top_power_output(result.stdout, top_n)
+
+
+def _parse_top_power_output(output, top_n=TOP_PROCESSES_COUNT):
+    """解析 top 命令的 power 輸出。
+
+    top -l 2 會輸出兩次採樣，第二次採樣才有準確的 power 數據。
+    格式範例（第二次採樣的程序區塊）：
+        PID    COMMAND          POWER
+        592    WindowServer     43.6
+        28961  Google Chrome He 42.4
+
+    Args:
+        output: top 命令的標準輸出字串。
+        top_n: 要回傳的程序數量。
+
+    Returns:
+        包含 (name, pid, power) 元組的列表，
+        依 power 由大到小排序。
+    """
+    lines = output.splitlines()
+    # 找到第二個 "PID" 標題行（第二次採樣的程序列表）
+    header_indices = [
+        i for i, line in enumerate(lines)
+        if line.strip().startswith("PID") and "POWER" in line.upper()
+    ]
+    if len(header_indices) < 2:
+        logger.warning("無法在 top 輸出中找到第二次採樣的 POWER 標題")
+        return []
+
+    second_header_idx = header_indices[1]
+    processes = []
+    for line in lines[second_header_idx + 1:]:
+        line = line.strip()
+        if not line:
+            continue
+        # 遇到非程序資料行（如 "Processes:"）時停止
+        if line.startswith("Processes:") or line.startswith("Load Avg:"):
+            break
+        parts = line.split()
+        if len(parts) < 3:
+            continue
+        try:
+            pid = int(parts[0])
+        except ValueError:
+            continue
+        # power 是最後一個欄位，command 可能包含空格
+        try:
+            power = float(parts[-1])
+        except ValueError:
+            continue
+        # command 是中間所有欄位（去頭去尾）
+        name = " ".join(parts[1:-1])
+        if power <= 0:
+            continue
+        processes.append((name, pid, power))
+
+    processes.sort(key=lambda x: x[2], reverse=True)
+    return processes[:top_n]
+
+
+class TopPowerProcessesCollector:
+    """自訂 Prometheus Collector：暴露耗電量前 N 名程序。
+
+    透過 top 命令取得 per-process energy impact，
+    每次抓取時動態生成指標，避免舊的 label 組合殘留。
+    """
+
+    def describe(self):
+        """回傳空列表，表示此 Collector 不預先宣告指標。"""
+        return []
+
+    def collect(self):
+        """收集耗電量前 N 名程序的指標。
+
+        Yields:
+            GaugeMetricFamily: 包含每個程序的 energy impact 值，
+            以 process_name、pid 和 rank 作為 label。
+        """
+        gauge = GaugeMetricFamily(
+            "node_top_power_process_energy",
+            "耗電量前 N 名程序的 energy impact 值",
+            labels=["process_name", "pid", "rank"],
+        )
+        top_processes = _get_top_power_processes()
+        for rank, (name, pid, power) in enumerate(top_processes, start=1):
+            gauge.add_metric([name, str(pid), str(rank)], power)
+        yield gauge
+
+
+# 註冊自訂 Collectors
 registry.register(TopProcessesCollector())
+registry.register(TopNetworkProcessesCollector())
+registry.register(TopPowerProcessesCollector())
 
 
 def _collect_boot_time():

@@ -161,11 +161,23 @@ Service Monitor 持續檢查以下 Tw_stock 微服務的 TCP 連線狀態：
 - `tw_stock_service_up`：服務健康狀態（1=正常, 0=異常）
 - `tw_stock_service_response_time_seconds`：TCP 連線回應時間（秒）
 
-### 程序記憶體使用量（macOS Exporter）
+### 程序排行榜指標（macOS Exporter）
 
-macOS Exporter 額外暴露記憶體使用量前 15 名程序的指標：
+macOS Exporter 額外暴露 per-process 排行榜指標，每次抓取時動態生成，取前 15 名：
+
+#### 記憶體使用量排行
 
 - `node_top_memory_process_rss_bytes`：程序 RSS 記憶體使用量（bytes），包含 labels：`process_name`、`pid`、`rank`
+
+#### 網路流量排行
+
+- `node_top_network_process_bytes`：程序網路流量（bytes），包含 labels：`process_name`、`pid`、`rank`、`direction`（in/out）
+- 資料來源：macOS 內建 `nettop` 命令，依總流量（bytes_in + bytes_out）排序
+
+#### 耗電量排行
+
+- `node_top_power_process_energy`：程序 energy impact 值，包含 labels：`process_name`、`pid`、`rank`
+- 資料來源：macOS 內建 `top` 命令的 power 欄位
 
 ## 其他操作
 

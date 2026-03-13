@@ -1,17 +1,25 @@
 """macOS Exporter 單元測試。
 
-測試磁碟分區過濾邏輯與程序記憶體使用量收集功能，
+測試磁碟分區過濾邏輯、程序記憶體使用量收集、
+程序網路流量收集與程序耗電量收集功能，
 確保只監控有意義的掛載點，以及正確收集前 N 名程序資訊。
 """
 
+import subprocess
 import unittest
 from collections import namedtuple
 from unittest.mock import MagicMock, patch
 
 from src.macos_exporter import (
+    TopNetworkProcessesCollector,
+    TopPowerProcessesCollector,
     TopProcessesCollector,
     _get_top_memory_processes,
+    _get_top_network_processes,
+    _get_top_power_processes,
     _is_meaningful_partition,
+    _parse_nettop_output,
+    _parse_top_power_output,
 )
 
 # 模擬 psutil 的 sdiskpart 結構
@@ -378,6 +386,452 @@ class TestTopProcessesCollector(unittest.TestCase):
     def test_describe_returns_empty(self):
         """describe() 應回傳空列表（不預先宣告指標）。"""
         collector = TopProcessesCollector()
+        self.assertEqual(list(collector.describe()), [])
+
+
+class TestParseNettopOutput(unittest.TestCase):
+    """測試 _parse_nettop_output 解析函式。"""
+
+    def test_parses_standard_output(self):
+        """應正確解析標準 nettop CSV 輸出。"""
+        output = (
+            ",bytes_in,bytes_out,\n"
+            "Chrome.12345,1024,2048,\n"
+            "Safari.67890,512,256,\n"
+        )
+        result = _parse_nettop_output(output, top_n=15)
+
+        self.assertEqual(len(result), 2)
+        # 依總流量排序：Chrome(3072) > Safari(768)
+        self.assertEqual(result[0], ("Chrome", 12345, 1024, 2048))
+        self.assertEqual(result[1], ("Safari", 67890, 512, 256))
+
+    def test_sorts_by_total_traffic(self):
+        """應依照總流量（bytes_in + bytes_out）由大到小排序。"""
+        output = (
+            ",bytes_in,bytes_out,\n"
+            "small.100,10,20,\n"
+            "large.200,5000,3000,\n"
+            "medium.300,100,200,\n"
+        )
+        result = _parse_nettop_output(output, top_n=15)
+
+        self.assertEqual(len(result), 3)
+        self.assertEqual(result[0][0], "large")
+        self.assertEqual(result[1][0], "medium")
+        self.assertEqual(result[2][0], "small")
+
+    def test_respects_top_n(self):
+        """應只回傳前 N 名。"""
+        output = (
+            ",bytes_in,bytes_out,\n"
+            "a.1,100,100,\n"
+            "b.2,200,200,\n"
+            "c.3,300,300,\n"
+        )
+        result = _parse_nettop_output(output, top_n=2)
+
+        self.assertEqual(len(result), 2)
+        self.assertEqual(result[0][0], "c")
+        self.assertEqual(result[1][0], "b")
+
+    def test_skips_zero_traffic(self):
+        """bytes_in 和 bytes_out 皆為 0 的程序應被跳過。"""
+        output = (
+            ",bytes_in,bytes_out,\n"
+            "active.100,1024,512,\n"
+            "idle.200,0,0,\n"
+        )
+        result = _parse_nettop_output(output, top_n=15)
+
+        self.assertEqual(len(result), 1)
+        self.assertEqual(result[0][0], "active")
+
+    def test_skips_header_line(self):
+        """應跳過以逗號開頭的標題行。"""
+        output = ",bytes_in,bytes_out,\nApp.123,100,200,\n"
+        result = _parse_nettop_output(output, top_n=15)
+
+        self.assertEqual(len(result), 1)
+        self.assertEqual(result[0][0], "App")
+
+    def test_handles_process_name_with_dots(self):
+        """程序名稱包含點號時應正確解析（取最後一個點後為 PID）。"""
+        output = (
+            ",bytes_in,bytes_out,\n"
+            "com.apple.WebKit.12345,500,300,\n"
+        )
+        result = _parse_nettop_output(output, top_n=15)
+
+        self.assertEqual(len(result), 1)
+        self.assertEqual(result[0][0], "com.apple.WebKit")
+        self.assertEqual(result[0][1], 12345)
+
+    def test_handles_truncated_name(self):
+        """nettop 輸出的截斷程序名稱應能正確解析。"""
+        output = (
+            ",bytes_in,bytes_out,\n"
+            "Google Chrome H.47589,1000,500,\n"
+        )
+        result = _parse_nettop_output(output, top_n=15)
+
+        self.assertEqual(len(result), 1)
+        self.assertEqual(result[0][0], "Google Chrome H")
+        self.assertEqual(result[0][1], 47589)
+
+    def test_handles_empty_output(self):
+        """空輸出應回傳空列表。"""
+        result = _parse_nettop_output("", top_n=15)
+        self.assertEqual(result, [])
+
+    def test_skips_invalid_bytes_values(self):
+        """無法解析為整數的 bytes 值應被跳過。"""
+        output = (
+            ",bytes_in,bytes_out,\n"
+            "good.100,1024,512,\n"
+            "bad.200,abc,def,\n"
+        )
+        result = _parse_nettop_output(output, top_n=15)
+
+        self.assertEqual(len(result), 1)
+        self.assertEqual(result[0][0], "good")
+
+    def test_skips_line_without_dot_in_identity(self):
+        """缺少 PID 分隔點號的行應被跳過。"""
+        output = (
+            ",bytes_in,bytes_out,\n"
+            "nopid,1024,512,\n"
+            "valid.100,200,300,\n"
+        )
+        result = _parse_nettop_output(output, top_n=15)
+
+        self.assertEqual(len(result), 1)
+        self.assertEqual(result[0][0], "valid")
+
+
+class TestGetTopNetworkProcesses(unittest.TestCase):
+    """測試 _get_top_network_processes 函式。"""
+
+    @patch("src.macos_exporter.subprocess.run")
+    def test_calls_nettop_command(self, mock_run):
+        """應使用正確的參數呼叫 nettop。"""
+        mock_run.return_value = MagicMock(
+            stdout=",bytes_in,bytes_out,\nApp.100,1024,512,\n"
+        )
+
+        result = _get_top_network_processes(top_n=15)
+
+        mock_run.assert_called_once()
+        args = mock_run.call_args[0][0]
+        self.assertEqual(args[0], "nettop")
+        self.assertIn("-P", args)
+        self.assertIn("-x", args)
+        self.assertEqual(len(result), 1)
+
+    @patch("src.macos_exporter.subprocess.run")
+    def test_returns_empty_on_timeout(self, mock_run):
+        """subprocess 逾時應回傳空列表。"""
+        mock_run.side_effect = subprocess.TimeoutExpired(cmd="nettop", timeout=30)
+
+        result = _get_top_network_processes()
+
+        self.assertEqual(result, [])
+
+    @patch("src.macos_exporter.subprocess.run")
+    def test_returns_empty_on_file_not_found(self, mock_run):
+        """找不到 nettop 命令應回傳空列表。"""
+        mock_run.side_effect = FileNotFoundError()
+
+        result = _get_top_network_processes()
+
+        self.assertEqual(result, [])
+
+    @patch("src.macos_exporter.subprocess.run")
+    def test_returns_empty_on_os_error(self, mock_run):
+        """作業系統錯誤應回傳空列表。"""
+        mock_run.side_effect = OSError("Permission denied")
+
+        result = _get_top_network_processes()
+
+        self.assertEqual(result, [])
+
+
+class TestTopNetworkProcessesCollector(unittest.TestCase):
+    """測試 TopNetworkProcessesCollector 自訂 Prometheus Collector。"""
+
+    @patch("src.macos_exporter._get_top_network_processes")
+    def test_collect_yields_gauge_metric_family(self, mock_get_top):
+        """collect() 應產生包含網路流量指標的 GaugeMetricFamily。"""
+        mock_get_top.return_value = [
+            ("Chrome", 123, 1024, 2048),
+            ("Safari", 456, 512, 256),
+        ]
+
+        collector = TopNetworkProcessesCollector()
+        metrics = list(collector.collect())
+
+        self.assertEqual(len(metrics), 1)
+        metric = metrics[0]
+        self.assertEqual(metric.name, "node_top_network_process_bytes")
+        # 每個程序產生 2 個 sample（in + out）
+        self.assertEqual(len(metric.samples), 4)
+
+    @patch("src.macos_exporter._get_top_network_processes")
+    def test_collect_includes_correct_labels(self, mock_get_top):
+        """指標應包含 process_name、pid、rank 和 direction labels。"""
+        mock_get_top.return_value = [
+            ("Firefox", 789, 5000, 3000),
+        ]
+
+        collector = TopNetworkProcessesCollector()
+        metrics = list(collector.collect())
+        samples = metrics[0].samples
+
+        # in 方向
+        in_sample = samples[0]
+        self.assertEqual(in_sample.labels["process_name"], "Firefox")
+        self.assertEqual(in_sample.labels["pid"], "789")
+        self.assertEqual(in_sample.labels["rank"], "1")
+        self.assertEqual(in_sample.labels["direction"], "in")
+        self.assertEqual(in_sample.value, 5000)
+
+        # out 方向
+        out_sample = samples[1]
+        self.assertEqual(out_sample.labels["direction"], "out")
+        self.assertEqual(out_sample.value, 3000)
+
+    @patch("src.macos_exporter._get_top_network_processes")
+    def test_collect_empty_when_no_processes(self, mock_get_top):
+        """沒有程序時應回傳空的 GaugeMetricFamily。"""
+        mock_get_top.return_value = []
+
+        collector = TopNetworkProcessesCollector()
+        metrics = list(collector.collect())
+
+        self.assertEqual(len(metrics), 1)
+        self.assertEqual(len(metrics[0].samples), 0)
+
+    def test_describe_returns_empty(self):
+        """describe() 應回傳空列表（不預先宣告指標）。"""
+        collector = TopNetworkProcessesCollector()
+        self.assertEqual(list(collector.describe()), [])
+
+
+class TestParseTopPowerOutput(unittest.TestCase):
+    """測試 _parse_top_power_output 解析函式。"""
+
+    SAMPLE_OUTPUT = (
+        "Processes: 500 total, 3 running, 497 sleeping, 3000 threads \n"
+        "2026/03/13 21:11:18\n"
+        "Load Avg: 3.90, 4.07, 3.85 \n"
+        "CPU usage: 8.3% user, 11.83% sys, 80.13% idle \n"
+        "\n"
+        "PID    COMMAND          POWER\n"
+        "100    WindowServer     0.0  \n"
+        "200    Finder           0.0  \n"
+        "Processes: 500 total, 3 running, 497 sleeping, 3000 threads \n"
+        "2026/03/13 21:11:19\n"
+        "Load Avg: 3.90, 4.07, 3.85 \n"
+        "CPU usage: 12.58% user, 4.22% sys, 83.19% idle \n"
+        "\n"
+        "PID    COMMAND          POWER\n"
+        "592    WindowServer     43.6 \n"
+        "28961  Google Chrome He 42.4 \n"
+        "600    runningboardd    15.1 \n"
+        "1503   logioptionsplus  1.6  \n"
+        "999    idleproc         0.0  \n"
+    )
+
+    def test_parses_second_sample(self):
+        """應解析第二次採樣的程序列表。"""
+        result = _parse_top_power_output(self.SAMPLE_OUTPUT, top_n=15)
+
+        # power > 0 的有 4 個程序
+        self.assertEqual(len(result), 4)
+        self.assertEqual(result[0], ("WindowServer", 592, 43.6))
+        self.assertEqual(result[1], ("Google Chrome He", 28961, 42.4))
+        self.assertEqual(result[2], ("runningboardd", 600, 15.1))
+        self.assertEqual(result[3], ("logioptionsplus", 1503, 1.6))
+
+    def test_skips_zero_power(self):
+        """power 為 0 的程序應被跳過。"""
+        result = _parse_top_power_output(self.SAMPLE_OUTPUT, top_n=15)
+
+        names = [r[0] for r in result]
+        self.assertNotIn("idleproc", names)
+
+    def test_respects_top_n(self):
+        """應只回傳前 N 名。"""
+        result = _parse_top_power_output(self.SAMPLE_OUTPUT, top_n=2)
+
+        self.assertEqual(len(result), 2)
+        self.assertEqual(result[0][0], "WindowServer")
+        self.assertEqual(result[1][0], "Google Chrome He")
+
+    def test_handles_command_with_spaces(self):
+        """程序名稱包含空格時應正確解析。"""
+        output = (
+            "PID    COMMAND          POWER\n"
+            "100    dummy            0.0  \n"
+            "PID    COMMAND          POWER\n"
+            "200    My Long App Name 5.5  \n"
+        )
+        result = _parse_top_power_output(output, top_n=15)
+
+        self.assertEqual(len(result), 1)
+        self.assertEqual(result[0][0], "My Long App Name")
+        self.assertEqual(result[0][1], 200)
+        self.assertEqual(result[0][2], 5.5)
+
+    def test_returns_empty_without_second_header(self):
+        """只有一次採樣時應回傳空列表。"""
+        output = (
+            "PID    COMMAND          POWER\n"
+            "100    WindowServer     43.6 \n"
+        )
+        result = _parse_top_power_output(output, top_n=15)
+
+        self.assertEqual(result, [])
+
+    def test_handles_empty_output(self):
+        """空輸出應回傳空列表。"""
+        result = _parse_top_power_output("", top_n=15)
+        self.assertEqual(result, [])
+
+    def test_stops_at_processes_line(self):
+        """遇到 'Processes:' 行時應停止解析。"""
+        output = (
+            "PID    COMMAND          POWER\n"
+            "100    dummy            0.0  \n"
+            "PID    COMMAND          POWER\n"
+            "200    App              5.5  \n"
+            "Processes: 500 total, 3 running\n"
+            "300    Ghost            99.9 \n"
+        )
+        result = _parse_top_power_output(output, top_n=15)
+
+        self.assertEqual(len(result), 1)
+        self.assertEqual(result[0][0], "App")
+
+    def test_sorts_by_power_descending(self):
+        """應依 power 由大到小排序。"""
+        output = (
+            "PID    COMMAND          POWER\n"
+            "100    dummy            0.0  \n"
+            "PID    COMMAND          POWER\n"
+            "1      low              1.0  \n"
+            "2      high             10.0 \n"
+            "3      mid              5.0  \n"
+        )
+        result = _parse_top_power_output(output, top_n=15)
+
+        self.assertEqual(result[0][0], "high")
+        self.assertEqual(result[1][0], "mid")
+        self.assertEqual(result[2][0], "low")
+
+
+class TestGetTopPowerProcesses(unittest.TestCase):
+    """測試 _get_top_power_processes 函式。"""
+
+    @patch("src.macos_exporter.subprocess.run")
+    def test_calls_top_command(self, mock_run):
+        """應使用正確的參數呼叫 top。"""
+        mock_run.return_value = MagicMock(
+            stdout=(
+                "PID    COMMAND          POWER\n"
+                "100    dummy            0.0  \n"
+                "PID    COMMAND          POWER\n"
+                "200    App              5.5  \n"
+            )
+        )
+
+        result = _get_top_power_processes(top_n=15)
+
+        mock_run.assert_called_once()
+        args = mock_run.call_args[0][0]
+        self.assertEqual(args[0], "top")
+        self.assertIn("-l", args)
+        self.assertIn("2", args)
+        self.assertIn("power", args)
+        self.assertEqual(len(result), 1)
+
+    @patch("src.macos_exporter.subprocess.run")
+    def test_returns_empty_on_timeout(self, mock_run):
+        """subprocess 逾時應回傳空列表。"""
+        mock_run.side_effect = subprocess.TimeoutExpired(cmd="top", timeout=30)
+
+        result = _get_top_power_processes()
+
+        self.assertEqual(result, [])
+
+    @patch("src.macos_exporter.subprocess.run")
+    def test_returns_empty_on_file_not_found(self, mock_run):
+        """找不到 top 命令應回傳空列表。"""
+        mock_run.side_effect = FileNotFoundError()
+
+        result = _get_top_power_processes()
+
+        self.assertEqual(result, [])
+
+    @patch("src.macos_exporter.subprocess.run")
+    def test_returns_empty_on_os_error(self, mock_run):
+        """作業系統錯誤應回傳空列表。"""
+        mock_run.side_effect = OSError("Permission denied")
+
+        result = _get_top_power_processes()
+
+        self.assertEqual(result, [])
+
+
+class TestTopPowerProcessesCollector(unittest.TestCase):
+    """測試 TopPowerProcessesCollector 自訂 Prometheus Collector。"""
+
+    @patch("src.macos_exporter._get_top_power_processes")
+    def test_collect_yields_gauge_metric_family(self, mock_get_top):
+        """collect() 應產生包含耗電量指標的 GaugeMetricFamily。"""
+        mock_get_top.return_value = [
+            ("WindowServer", 592, 43.6),
+            ("Chrome", 123, 10.5),
+        ]
+
+        collector = TopPowerProcessesCollector()
+        metrics = list(collector.collect())
+
+        self.assertEqual(len(metrics), 1)
+        metric = metrics[0]
+        self.assertEqual(metric.name, "node_top_power_process_energy")
+        self.assertEqual(len(metric.samples), 2)
+
+    @patch("src.macos_exporter._get_top_power_processes")
+    def test_collect_includes_correct_labels(self, mock_get_top):
+        """指標應包含 process_name、pid 和 rank labels。"""
+        mock_get_top.return_value = [
+            ("WindowServer", 592, 43.6),
+        ]
+
+        collector = TopPowerProcessesCollector()
+        metrics = list(collector.collect())
+        sample = metrics[0].samples[0]
+
+        self.assertEqual(sample.labels["process_name"], "WindowServer")
+        self.assertEqual(sample.labels["pid"], "592")
+        self.assertEqual(sample.labels["rank"], "1")
+        self.assertEqual(sample.value, 43.6)
+
+    @patch("src.macos_exporter._get_top_power_processes")
+    def test_collect_empty_when_no_processes(self, mock_get_top):
+        """沒有程序時應回傳空的 GaugeMetricFamily。"""
+        mock_get_top.return_value = []
+
+        collector = TopPowerProcessesCollector()
+        metrics = list(collector.collect())
+
+        self.assertEqual(len(metrics), 1)
+        self.assertEqual(len(metrics[0].samples), 0)
+
+    def test_describe_returns_empty(self):
+        """describe() 應回傳空列表（不預先宣告指標）。"""
+        collector = TopPowerProcessesCollector()
         self.assertEqual(list(collector.describe()), [])
 
 
