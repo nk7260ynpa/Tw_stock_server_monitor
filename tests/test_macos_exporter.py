@@ -139,6 +139,26 @@ class TestIsMeaningfulPartition(unittest.TestCase):
         )
         self.assertFalse(_is_meaningful_partition(part))
 
+    def test_coresimulator_volume_is_excluded(self):
+        """Xcode iOS 模擬器虛擬磁碟應被排除。"""
+        part = MockPartition(
+            device="disk4s1",
+            mountpoint="/Library/Developer/CoreSimulator/Volumes/iOS_23D8133",
+            fstype="apfs",
+            opts="local,nodev,nosuid,nobrowse,journaled,multilabel",
+        )
+        self.assertFalse(_is_meaningful_partition(part))
+
+    def test_coresimulator_other_volume_is_excluded(self):
+        """其他版本的 CoreSimulator 虛擬磁碟也應被排除。"""
+        part = MockPartition(
+            device="disk5s1",
+            mountpoint="/Library/Developer/CoreSimulator/Volumes/watchOS_24T1001",
+            fstype="apfs",
+            opts="local,nodev,nosuid,nobrowse,journaled,multilabel",
+        )
+        self.assertFalse(_is_meaningful_partition(part))
+
     def test_external_hfs_disk_is_meaningful(self):
         """外接 HFS 磁碟應被視為有意義的分區。"""
         part = MockPartition(
@@ -186,6 +206,7 @@ class TestCollectFilesystem(unittest.TestCase):
             MockPartition("/dev/disk1s1", "/System/Volumes/iSCPreboot", "apfs", ""),
             MockPartition("/dev/disk1s3", "/System/Volumes/Hardware", "apfs", ""),
             MockPartition("/dev/disk3s1", "/System/Volumes/Data", "apfs", ""),
+            MockPartition("disk4s1", "/Library/Developer/CoreSimulator/Volumes/iOS_23D8133", "apfs", ""),
         ]
 
         # 模擬 disk_usage 回傳值
@@ -210,6 +231,9 @@ class TestCollectFilesystem(unittest.TestCase):
         self.assertNotIn("/System/Volumes/xarts", call_args)
         self.assertNotIn("/System/Volumes/iSCPreboot", call_args)
         self.assertNotIn("/System/Volumes/Hardware", call_args)
+        self.assertNotIn(
+            "/Library/Developer/CoreSimulator/Volumes/iOS_23D8133", call_args
+        )
 
 
 class TestGetTopMemoryProcesses(unittest.TestCase):

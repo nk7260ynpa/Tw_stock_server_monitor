@@ -533,6 +533,7 @@ def _is_meaningful_partition(part):
         "/System/Volumes/xarts",
         "/System/Volumes/iSCPreboot",
         "/System/Volumes/Hardware",
+        "/Library/Developer/CoreSimulator/Volumes",
     )
     if part.mountpoint.startswith(excluded_mountpoint_prefixes):
         return False
