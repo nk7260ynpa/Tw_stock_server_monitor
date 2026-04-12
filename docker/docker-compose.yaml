@@ -7,8 +7,8 @@ services:
     container_name: tw-stock-server-monitor
     volumes:
       - ../logs:/app/logs
-    ports:
-      - "9102:9102"
+    expose:
+      - "9102"
     environment:
       - MONITOR_METRICS_PORT=9102
       - MONITOR_CHECK_INTERVAL=30
@@ -24,8 +24,8 @@ services:
     volumes:
       - ./prometheus/prometheus.yml:/etc/prometheus/prometheus.yml:ro
       - prometheus_data:/prometheus
-    ports:
-      - "9090:9090"
+    expose:
+      - "9090"
     command:
       - "--config.file=/etc/prometheus/prometheus.yml"
       - "--storage.tsdb.retention.time=30d"
@@ -47,7 +47,7 @@ services:
       - "--path.rootfs=/rootfs"
       - "--collector.filesystem.mount-points-exclude=^/(sys|proc|dev|host|etc)($$|/)"
     ports:
-      - "9100:9100"
+      - "127.0.0.1:9100:9100"
     restart: always
 
   grafana:
@@ -57,7 +57,7 @@ services:
       - grafana_data:/var/lib/grafana
       - ./grafana/provisioning:/etc/grafana/provisioning:ro
     ports:
-      - "3000:3000"
+      - "127.0.0.1:3000:3000"
     environment:
       - GF_SECURITY_ADMIN_USER=admin
       - GF_SECURITY_ADMIN_PASSWORD=admin
