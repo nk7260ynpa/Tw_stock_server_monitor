@@ -17,8 +17,8 @@ docker compose -f "${SCRIPT_DIR}/docker/docker-compose.yaml" up -d
 echo ""
 echo "服務已啟動："
 echo "  - Grafana:       http://localhost:3000  (帳號: admin / 密碼: admin)"
-echo "  - Prometheus:    http://localhost:9090"
 echo "  - Node Exporter: http://localhost:9100  (Docker VM 指標)"
+echo "  (Prometheus 9090 與 Service Monitor 9102 已封閉對外 port，僅供容器內部存取)"
 
 # macOS 環境下自動啟動 macOS Exporter
 if [[ "$(uname)" == "Darwin" ]]; then
