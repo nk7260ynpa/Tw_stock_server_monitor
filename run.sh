@@ -20,22 +20,11 @@ echo "  - Grafana:       http://localhost:3000  (帳號: admin / 密碼: admin)"
 echo "  - Node Exporter: http://localhost:9100  (Docker VM 指標)"
 echo "  (Prometheus 9090 與 Service Monitor 9102 已封閉對外 port，僅供容器內部存取)"
 
-# macOS 環境下自動啟動 macOS Exporter
+# macOS 環境下自動啟動 macOS Exporter（透過 launchd 管理）
 if [[ "$(uname)" == "Darwin" ]]; then
   echo ""
-  echo "偵測到 macOS 環境，啟動 macOS Exporter..."
-  pip3 install -q psutil prometheus_client
-
-  # 停止已存在的 macOS Exporter
-  if pgrep -f "src.macos_exporter" > /dev/null 2>&1; then
-    echo "  停止舊的 macOS Exporter..."
-    pkill -f "src.macos_exporter" || true
-    sleep 1
-  fi
-
-  cd "${SCRIPT_DIR}"
-  nohup python3 -m src.macos_exporter > "${SCRIPT_DIR}/logs/macos_exporter.log" 2>&1 &
-  echo "  - macOS Exporter: http://localhost:9101  (macOS 主機指標)"
+  echo "偵測到 macOS 環境，透過 launchd 啟動 macOS Exporter..."
+  bash "${SCRIPT_DIR}/run_macos_exporter.sh"
   echo ""
   echo "提示：Grafana 儀表板頂部可切換 Job 變數："
   echo "  - macos-exporter：macOS 主機真實指標"
