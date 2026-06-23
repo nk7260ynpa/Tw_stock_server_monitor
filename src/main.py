@@ -23,15 +23,17 @@ DEFAULT_TIMEOUT = 5
 # 被監控的服務清單（服務名稱、主機、端口）
 # Docker 網路中使用容器名稱作為主機名稱
 MONITORED_SERVICES = [
-    {"name": "crawler", "host": "tw_stock_crawler", "port": 6738},
+    {"name": "crawler", "host": "tw_stocker_crawler", "port": 6738},
     {"name": "mysql", "host": "tw_stock_database", "port": 3306},
     {"name": "db_operating", "host": "tw_stock_db_operating", "port": 8080},
     {"name": "indicator", "host": "tw-stock-indicator", "port": 5001},
     {"name": "ml", "host": "tw-stock-ml", "port": 5002},
     {"name": "tools", "host": "tw_stock_tools", "port": 8000},
-    {"name": "dashboard", "host": "tw_stock_dashboard", "port": 8002},
-    {"name": "webpage", "host": "tw-stock-webpage", "port": 7938},
+    {"name": "dashboard", "host": "tw_stock_dashboard", "port": 8000},
+    {"name": "webpage", "host": "tw-stock-webpage", "port": 8000},
     {"name": "news", "host": "tw_stock_news", "port": 8003},
+    {"name": "hot", "host": "tw_stock_hot", "port": 5050},
+    {"name": "specialinfo", "host": "tw-stock-specialinfo", "port": 5055},
 ]
 
 # 建立獨立的 registry

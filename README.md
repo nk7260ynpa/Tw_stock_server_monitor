@@ -142,19 +142,22 @@ bash run.sh
 
 ### 服務健康檢查
 
-Service Monitor 持續檢查以下 Tw_stock 微服務的 TCP 連線狀態：
+Service Monitor 持續檢查以下 11 個 Tw_stock 微服務的 TCP 連線狀態
+（清單定義於 `src/main.py` 的 `MONITORED_SERVICES`）：
 
-| 服務 | 容器名稱 | 端口 |
-|------|---------|------|
-| Crawler | tw_stock_crawler | 6738 |
-| MySQL | tw_stock_database | 3306 |
-| DB Operating | tw_stock_db_operating | 8080 |
-| Indicator | tw-stock-indicator | 5001 |
-| ML | tw-stock-ml | 5002 |
-| Tools | tw_stock_tools | 8000 |
-| Dashboard | tw_stock_dashboard | 8002 |
-| Webpage | tw-stock-webpage | 7938 |
-| News | tw_stock_news | 8003 |
+| 服務 | 容器名稱（host） | 端口 |
+|------|-----------------|------|
+| crawler | tw_stocker_crawler | 6738 |
+| mysql | tw_stock_database | 3306 |
+| db_operating | tw_stock_db_operating | 8080 |
+| indicator | tw-stock-indicator | 5001 |
+| ml | tw-stock-ml | 5002 |
+| tools | tw_stock_tools | 8000 |
+| dashboard | tw_stock_dashboard | 8000 |
+| webpage | tw-stock-webpage | 8000 |
+| news | tw_stock_news | 8003 |
+| hot | tw_stock_hot | 5050 |
+| specialinfo | tw-stock-specialinfo | 5055 |
 
 暴露的 Prometheus 指標：
 
