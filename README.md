@@ -224,6 +224,20 @@ docker run --rm -v "$(pwd)":/app -w /app nk7260ynpa/tw-stock-monitor:latest \
   python -m pytest tests/ -v
 ```
 
+## CI/CD 與 GitHub 鏡像
+
+本專案以 GitLab 為主要儲存庫，並透過 `.gitlab-ci.yml` 的 `mirror-to-github`
+管線把內容鏡像到 GitHub。
+
+- **觸發時機**：僅在 `main` 打上 `vX.Y.Z` 版本 tag 時觸發；合併進 `main`
+  當下**不會**鏡像。
+- **鏡像內容**：管線會把 `main` 與該版本 tag 一併推送到 GitHub。
+- 認證使用 Runner 注入的 `GITHUB_SSH_KEY`（對應公鑰需加到 GitHub repo 的
+  Deploy keys 並開啟 Allow write access）。
+
+亦即：合併 MR 進 `main` 後，需另外打上 `vX.Y.Z` annotated tag 並 push 到 GitLab，
+才會觸發鏡像。
+
 ## 授權條款
 
 詳見 [LICENSE](LICENSE) 檔案。
