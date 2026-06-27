@@ -224,19 +224,54 @@ docker run --rm -v "$(pwd)":/app -w /app nk7260ynpa/tw-stock-monitor:latest \
   python -m pytest tests/ -v
 ```
 
-## CI/CD 與 GitHub 鏡像
+## CI/CD（自動部署 + GitHub 鏡像）
 
-本專案以 GitLab 為主要儲存庫，並透過 `.gitlab-ci.yml` 的 `mirror-to-github`
-管線把內容鏡像到 GitHub。
+本專案以 GitLab 為主要儲存庫，`.gitlab-ci.yml` 在 `main` 打上 `vX.Y.Z` 版本
+tag 時觸發兩條 job（合併進 `main` 當下**不會**觸發任何管線）：
 
-- **觸發時機**：僅在 `main` 打上 `vX.Y.Z` 版本 tag 時觸發；合併進 `main`
-  當下**不會**鏡像。
-- **鏡像內容**：管線會把 `main` 與該版本 tag 一併推送到 GitHub。
+1. **`deploy`**：重新建置並重啟 **Service Monitor 容器（僅此一顆）**。
+2. **`mirror-to-github`**：把 `main` 與該版本 tag 一併鏡像到 GitHub。
+
+### deploy（只重啟 Service Monitor，不碰其他容器）
+
+GitLab Runner 為 docker executor 並掛載 `/var/run/docker.sock`，故 `deploy`
+job 內的 `docker` 指令直接作用在 host 的 Docker daemon。`deploy` 嚴格維持
+**build → `rm -f` → run** 順序，且每一步的目標**只有 Service Monitor 容器**：
+
+```text
+docker build  →  docker rm -f tw-stock-server-monitor  →  docker run（新 image）
+```
+
+> **重要特例**：本 repo 為多容器監控堆疊，但**只有 Service Monitor 這顆 image
+> 由本 repo build**；Prometheus / Grafana / Node Exporter 皆為上游官方映像，且
+> compose 內以相對路徑 bind 掛載設定檔。因此 `deploy` **只 build + 重啟
+> `tw-stock-server-monitor` 一顆容器**，**絕不**`docker rm` 或重啟
+> prometheus / grafana / node-exporter，也**不**執行 `docker compose`、不動
+> launchd / macOS 原生 exporter。
+
+部署細節：
+
+- **image**：`nk7260ynpa/tw-stock-monitor`，同時打 `:vX.Y.Z`（不含 `v`）與
+  `:latest` 兩個 tag。
+- **容器**：`tw-stock-server-monitor`，`--restart=always`。
+- **網路**：`--network db_network`，讓 Service Monitor 對其他 Tw_stock 服務做
+  TCP 探測，並讓 Prometheus 以容器名 `tw-stock-server-monitor:9102` 在
+  `db_network` 上抓取指標。
+- **port**：`--expose 9102`（僅容器內部暴露、不對外 publish，與 compose 一致）。
+- **環境變數**：`MONITOR_METRICS_PORT=9102`、`MONITOR_CHECK_INTERVAL=30`、
+  `MONITOR_CHECK_TIMEOUT=5`。
+- **logs**：改用**具名 volume** `tw-stock-server-monitor_logs:/app/logs`
+  （取代 compose 的相對 bind 掛載，避免 socket-bound runner 內相對路徑失效）。
+  查看日誌用 `docker logs tw-stock-server-monitor`。
+
+### mirror-to-github
+
+- **鏡像內容**：管線把 `main` 與該版本 tag 一併推送到 GitHub。
 - 認證使用 Runner 注入的 `GITHUB_SSH_KEY`（對應公鑰需加到 GitHub repo 的
   Deploy keys 並開啟 Allow write access）。
 
-亦即：合併 MR 進 `main` 後，需另外打上 `vX.Y.Z` annotated tag 並 push 到 GitLab，
-才會觸發鏡像。
+亦即：合併 MR 進 `main` 後，需另外打上 `vX.Y.Z` annotated tag 並 push 到
+GitLab，才會觸發 `deploy`（重啟 Service Monitor）與 `mirror-to-github`（鏡像）。
 
 ## 授權條款
 

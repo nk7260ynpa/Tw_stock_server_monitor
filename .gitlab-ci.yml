@@ -1,12 +1,32 @@
-# GitLab CI/CD：在 main 打上 vX.Y.Z 版本 tag 時，把儲存庫鏡像推送到 GitHub
-#（合併進 main 當下不鏡像）
+# GitLab CI/CD：在 main 打上 vX.Y.Z 版本 tag 時，
+#   1) deploy ── 重新建置並重啟 Service Monitor 容器（單一容器）
+#   2) mirror ── 把儲存庫鏡像推送到 GitHub
+#（合併進 main 當下不觸發任何管線）
 #
 # ── 流程 ───────────────────────────────────────────────────────────
-#   feature 分支 → 開 Merge Request → 合併進 main（此時不鏡像）
+#   feature 分支 → 開 Merge Request → 合併進 main（此時不觸發）
 #   → 在 main 打上 vX.Y.Z 版本 tag → 本管線於該 tag 觸發
-#   → 將 main 與該 tag 一併推送（鏡像）到 GitHub。
+#   → deploy 重啟 Service Monitor、mirror 將 main 與該 tag 推送到 GitHub。
 #
-# ── 認證來源 ───────────────────────────────────────────────────────
+# ── 部署範圍（本 repo 的重要特例，務必理解）────────────────────────
+#   本 repo 為多容器監控堆疊（Service Monitor + Prometheus + Grafana +
+#   Node Exporter），但**只有 Service Monitor 這顆 image 由本 repo build**，
+#   其餘皆為上游官方映像，且 compose 內以相對路徑 bind 掛載設定檔。
+#   因此 deploy job **只 build + 重啟 Service Monitor 這一顆容器**
+#   （`tw-stock-server-monitor`），**絕不**碰 prometheus / grafana /
+#   node-exporter，也**不**執行 `docker compose`、不動 launchd / macOS
+#   原生 exporter（host 層，不在 CI 範圍）。
+#
+# ── Runner 與部署機制 ──────────────────────────────────────────────
+#   GitLab Runner 為 docker executor 並掛載 /var/run/docker.sock，
+#   故 deploy job 內的 docker 指令直接作用在「host 的 Docker daemon」，
+#   build 出來的 image 與 run 起來的容器都在 host 上。
+#   Service Monitor 在 9102 暴露健康檢查指標（僅 expose，由 Prometheus
+#   以容器名 tw-stock-server-monitor:9102 於 db_network 上抓取），並接
+#   db_network 以對其他 Tw_stock 服務（crawler:6738 / mysql:3306 / …）
+#   做 TCP 探測。
+#
+# ── 認證來源（mirror）──────────────────────────────────────────────
 #   GITHUB_SSH_KEY  由 GitLab Runner 注入（config.toml 的 environment 或掛載）。
 #                   其值可為 SSH 私鑰的「檔案路徑」或「私鑰內容」，本管線兩者皆支援。
 #                   對應公鑰需加到 GitHub repo → Settings → Deploy keys，並勾選
@@ -16,6 +36,7 @@
 #   GIT_DEPTH: 0 取得完整歷史，避免 shallow clone 導致 GitHub 推送被拒。
 
 stages:
+  - deploy
   - mirror
 
 workflow:
@@ -23,9 +44,54 @@ workflow:
     # 僅在 main 打上 vX.Y.Z 版本 tag 時建立管線（合併進 main 不觸發）
     - if: '$CI_COMMIT_TAG =~ /^v\d+\.\d+\.\d+$/'
 
+# ── deploy ──────────────────────────────────────────────────────────
+#   重新建置 Service Monitor image 並以新版本重啟容器（僅此一顆）。
+deploy:
+  stage: deploy
+  image: docker:27
+  needs: []
+  resource_group: deploy          # 序列化部署，避免同時兩條 deploy 互踩
+  rules:
+    - if: '$CI_COMMIT_TAG =~ /^v\d+\.\d+\.\d+$/'
+  variables:
+    IMAGE: "nk7260ynpa/tw-stock-monitor"          # 與 docker-compose 一致
+    CONTAINER: "tw-stock-server-monitor"          # 只動這顆 Service Monitor 容器
+    LOGS_VOLUME: "tw-stock-server-monitor_logs"   # 具名 volume（取代 compose 的相對 bind）
+    LOGS_PATH: "/app/logs"
+  before_script:
+    # 由 tag 推導不含前綴 v 的版本號（vX.Y.Z → X.Y.Z）
+    - export VERSION="${CI_COMMIT_TAG#v}"
+  script:
+    # 1) build：以 repo 根為 context、docker/Dockerfile 為 Dockerfile，
+    #    同時打上版本 tag 與 latest（只建 Service Monitor 這顆 image）。
+    - docker build -f docker/Dockerfile -t "$IMAGE:$VERSION" -t "$IMAGE:latest" .
+    # 2) rm -f：強制移除「舊的 Service Monitor 容器」。
+    #    僅針對 $CONTAINER（tw-stock-server-monitor），
+    #    絕不碰 prometheus / grafana / node-exporter。
+    #    先移除再重建，避免同名容器衝突；|| true 容忍首次部署尚無容器。
+    - docker rm -f "$CONTAINER" || true
+    # 3) run：以新 image 啟動 Service Monitor（單一容器）。
+    #    --network db_network：對其他服務做 TCP 探測，且讓 Prometheus 以
+    #    容器名於 db_network 抓取 9102 指標。
+    #    --expose 9102：僅容器內部暴露（不對外 publish），與 compose 一致。
+    - docker run -d
+        --name "$CONTAINER"
+        --restart=always
+        --network db_network
+        --volume "$LOGS_VOLUME:$LOGS_PATH"
+        --expose 9102
+        -e MONITOR_METRICS_PORT=9102
+        -e MONITOR_CHECK_INTERVAL=30
+        -e MONITOR_CHECK_TIMEOUT=5
+        "$IMAGE:latest"
+    # 4) 清掉懸置 image，避免 host 上 dangling image 堆積。
+    - docker image prune -f || true
+
+# ── mirror ──────────────────────────────────────────────────────────
 mirror-to-github:
   stage: mirror
   image: alpine:3.20
+  needs: []
   variables:
     GIT_DEPTH: 0                                       # 完整歷史，確保可 fast-forward 推送
     GITHUB_REPO: "git@github.com:nk7260ynpa/Tw_stock_server_monitor.git"
