@@ -132,10 +132,16 @@ Service Monitor 除了 TCP 探測，還額外走兩條路蒐集「CI 到底跑�
 | 註冊 | `tw_stock_gitlab_runner_online` | 約 2 小時 15 分 | GitLab 自身的 offline 判定，最慢但最權威 |
 | 業務 | 卡住的 job／未部署的 tag | 5～10 分鐘 | 直接反映「job 沒人接」「版本沒上線」 |
 
-> 容器狀態採**唯讀掛載 `/var/run/docker.sock`** 取得，而非啟用 runner 自身的
+> 容器狀態透過掛載 `/var/run/docker.sock` 取得，而非啟用 runner 自身的
 > metrics endpoint。原因：`gitlab-runner` 不 publish 任何 port，TCP 探測無效；
 > 而啟用 metrics 需修改 runner 設定檔（不屬於本 repo）並重啟 runner，且
 > **runner 行程一旦死掉就再也回不了自己的 metrics**——容器狀態則不受此限。
+>
+> **安全提醒**：掛載 docker.sock 等同把 host 的 Docker daemon 交給容器，
+> 實質等於 host root 權限。掛載參數的 `:ro` 只讓 **socket 檔案節點**唯讀，
+> **並不會限制經由該 socket 送出的 API 動詞**，不是安全邊界。本專案的程式
+> 只發 `GET`（見 `src/docker_monitor.py`），若要真正限制權限，需改接
+> 只放行 `GET /containers/*/json` 的 socket proxy。
 
 ## 環境需求
 
@@ -218,6 +224,9 @@ Service Monitor 持續檢查以下 11 個 Tw_stock 微服務的 TCP 連線狀態
 
 - `tw_stock_service_up`：服務健康狀態（1=正常, 0=異常）
 - `tw_stock_service_response_time_seconds`：TCP 連線回應時間（秒）
+- `tw_stock_last_check_timestamp_seconds`：最近一次完成健康檢查循環的時間。
+  Gauge 不會過期，主循環卡住時 `tw_stock_service_up` 會停在舊值看似正常，
+  必須靠這個指標才看得出「監控自己不動了」。
 
 ### CI/CD 基礎設施指標
 
@@ -256,8 +265,11 @@ TCP 探測不到**的 CI 容器。監控對象由 `MONITOR_CONTAINERS` 指定，
   依 `failure_reason` 分類。**`stuck_pending_no_matching_runners` 代表沒有
   runner 可接（基礎設施問題，重跑無效），與 `script_failure`（程式碼問題）
   可明確區分。**
-- `tw_stock_gitlab_tag_pipeline_status{project,tag,status}`：最新版本 tag 對應
-  pipeline 的狀態，`missing` 代表該 tag 根本沒有產生 pipeline。
+- `tw_stock_gitlab_tag_pipeline_status{project,tag,status}`：最新版本 tag 的
+  **部署狀態**。取該 tag pipeline 內 `deploy` job 的狀態，而非整條 pipeline
+  ——tag pipeline 另含互不相依的 `mirror-to-github`，鏡像失敗不代表版本沒
+  上線，用 pipeline 狀態會造成永久誤報。沒有 `deploy` job 的專案退回
+  pipeline 狀態，`missing` 代表該 tag 根本沒有產生 pipeline。
 - `tw_stock_gitlab_tag_undeployed_seconds{project,tag}`：最新 tag 尚未成功部署的
   秒數（成功時為 0）。這是事故最直接的業務影響指標。
 - `tw_stock_gitlab_api_up`、`tw_stock_gitlab_token_configured`、
@@ -288,10 +300,15 @@ TCP 探測不到**的 CI 容器。監控對象由 `MONITOR_CONTAINERS` 指定，
 | `TwStockServiceDown` | critical | 微服務 TCP 探測連續失敗（5m） |
 | `PrometheusTargetDown` | warning | Prometheus 抓取目標失效（10m） |
 | `ServiceMonitorMetricsMissing` | critical | 完全找不到 Service Monitor 指標（10m） |
+| `ServiceMonitorCheckStalled` | critical | 健康檢查主循環逾 5 分鐘沒完成一輪（5m） |
 
 > `GitLabJobsStuckNoMatchingRunner`（基礎設施）與 `GitLabPipelineFailed`
 > （程式碼）刻意分成兩條規則且嚴重度不同：前者重跑 pipeline 沒有用，必須先修
 > runner；兩者同時出現時應優先處理前者。
+>
+> `ServiceMonitorMetricsMissing` 抓「監控整個不見了」，
+> `ServiceMonitorCheckStalled` 抓「監控還在但已經不動了」——Gauge 不會過期，
+> 主循環卡住時舊值會一直看起來是健康的，這正是本次事故「無聲失效」的同型風險。
 
 ### 設定 GitLab API 權杖
 
