@@ -265,8 +265,9 @@ def _update_container_metrics(name, info):
 
     raw_state = (info or {}).get("State") or {}
     exit_code = raw_state.get("ExitCode")
+    # 容器不存在時填 -1，才不會與「正常退出（Exit 0）」同值而難以區辨
     container_exit_code.labels(container=name).set(
-        exit_code if isinstance(exit_code, (int, float)) else 0
+        exit_code if isinstance(exit_code, (int, float)) else -1
     )
 
     started_at = parse_iso_timestamp(raw_state.get("StartedAt"))

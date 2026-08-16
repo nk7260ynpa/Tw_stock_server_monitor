@@ -97,6 +97,8 @@ tests:
     input_series:
       - series: "tw_stock_gitlab_runners_online_total"
         values: "1 1 0+0x30"
+      - series: "tw_stock_gitlab_token_configured"
+        values: "1+0x30"
     alert_rule_test:
       - eval_time: 25m
         alertname: GitLabNoOnlineRunner
@@ -262,9 +264,10 @@ tests:
             exp_annotations:
               summary: "專案 Tw_stock_DB_Operating 的 tag v2.13.0 尚未成功部署"
               description: >-
-                該 tag 已建立超過 30 分鐘，但對應 pipeline 狀態為
-                failed（success 以外皆視為未部署，missing 代表
-                該 tag 根本沒有產生 pipeline）。線上跑的版本與 main 已脫節。
+                該 tag 已建立超過 30 分鐘，但部署狀態為 failed
+                （取該 tag pipeline 的 deploy job 狀態；沒有 deploy job 的專案
+                退回 pipeline 狀態，missing 代表該 tag 根本沒有產生 pipeline）。
+                線上跑的版本與 main 已脫節。
 
   # ── 監控自身健康 ──────────────────────────────────────────────
   - interval: 1m
@@ -315,11 +318,32 @@ tests:
         exp_alerts: []
 
   - interval: 1m
+    name: 未設定權杖時不可把「gauge 預設值 0」誤報成 CI 停擺
+    input_series:
+      # 未設權杖時 collector 完全不執行，這些 gauge 會停在預設值 0，
+      # 若規則沒有併看 token_configured 就會變成永久假 critical。
+      - series: "tw_stock_gitlab_token_configured"
+        values: "0+0x120"
+      - series: "tw_stock_gitlab_runners_online_total"
+        values: "0+0x120"
+      - series: "tw_stock_gitlab_last_collect_timestamp_seconds"
+        values: "0+0x120"
+    alert_rule_test:
+      - eval_time: 90m
+        alertname: GitLabNoOnlineRunner
+        exp_alerts: []
+      - eval_time: 90m
+        alertname: GitLabCollectorStalled
+        exp_alerts: []
+
+  - interval: 1m
     name: GitLab 指標停止更新時應告警
     input_series:
       # 時間戳停在測試起點，隨評估時間推進而變舊
       - series: "tw_stock_gitlab_last_collect_timestamp_seconds"
         values: "0+0x90"
+      - series: "tw_stock_gitlab_token_configured"
+        values: "1+0x90"
     alert_rule_test:
       - eval_time: 20m
         alertname: GitLabCollectorStalled

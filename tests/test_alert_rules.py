@@ -102,7 +102,7 @@ class TestAlertRuleStructure(unittest.TestCase):
         self.assertEqual(len(names), len(set(names)), "告警名稱重複")
 
     def test_stateful_alerts_have_for_duration(self):
-        """除 absent() 類外，告警都應設 for，避免抖動誤報。"""
+        """每條告警都應設 for，避免單次抓取抖動就誤報。"""
         for filename, rule in _iter_alerts():
             with self.subTest(alert=rule["alert"], file=filename):
                 self.assertTrue(rule.get("for"), "缺少 for 持續時間")

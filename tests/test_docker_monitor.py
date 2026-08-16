@@ -179,6 +179,13 @@ class TestUpdateContainerMetrics(unittest.TestCase):
             ),
             1,
         )
+        # 用 -1 而非 0，才不會與「正常退出（Exit 0）」混淆
+        self.assertEqual(
+            registry.get_sample_value(
+                "tw_stock_container_exit_code", {"container": "missing-case"}
+            ),
+            -1,
+        )
 
 
 class TestCollectContainerHealth(unittest.TestCase):
