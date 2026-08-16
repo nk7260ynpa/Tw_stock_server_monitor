@@ -1,0 +1,215 @@
+# CI 基礎設施告警規則
+#
+# 補 2026-07/08「gitlab-runner 容器 Exited(0) 四週、零告警」事故的監控缺口。
+# 指標來源為 Service Monitor（src/docker_monitor.py、src/gitlab_monitor.py）。
+#
+# 分層設計（偵測速度由快到慢，互為備援）：
+#   1. 容器狀態（每 30 秒）  → GitLabRunnerContainerDown，約 5 分鐘內告警。
+#   2. runner 心跳（每 5 分鐘）→ GitLabRunnerNoContact，約 105 分鐘內告警。
+#      GitLab 最多每 40 分鐘才寫一次 contacted_at，故門檻取 90 分鐘。
+#   3. GitLab 註冊狀態        → GitLabRunnerOffline，GitLab 判定 offline 需
+#      約 2 小時未聯繫，是最慢但最貼近「job 到底跑不跑得動」的訊號。
+#   4. 業務結果              → GitLabJobsStuckNoMatchingRunner／
+#      GitLabTagNotDeployed，直接反映「job 沒人接」與「tag 沒部署」。
+
+groups:
+  - name: ci-infrastructure
+    interval: 30s
+    rules:
+      # ── 容器存活 ────────────────────────────────────────────────
+      - alert: GitLabRunnerContainerDown
+        expr: tw_stock_container_up{container="gitlab-runner"} == 0
+        for: 5m
+        labels:
+          severity: critical
+          component: ci
+        annotations:
+          summary: "GitLab Runner 容器未在執行，CI 已停擺"
+          description: >-
+            gitlab-runner 容器目前不是 running 狀態。對常駐服務而言
+            Exit 0 同樣是異常：restart policy 為 unless-stopped 時，
+            容器被明確 stop 過就不會自動拉起，CI job 會全部卡在 pending
+            但不影響任何對外 port，極易無聲無息。
+          runbook: >-
+            docker start gitlab-runner；並確認 GitLab 本體（container: gitlab）
+            是否正常回應，2026-07 那次即為 GitLab 回 502 後 runner 收到
+            stop signal 正常退出。
+
+      - alert: CIContainerDown
+        expr: tw_stock_container_up{container!="gitlab-runner"} == 0
+        for: 10m
+        labels:
+          severity: warning
+          component: ci
+        annotations:
+          summary: "受監控容器 {{ $labels.container }} 未在執行"
+          description: >-
+            該容器不是 running 狀態。GitLab 本體停擺會連帶讓 runner 空轉，
+            最終導致 CI 停擺。
+
+      - alert: DockerApiUnreachable
+        expr: tw_stock_docker_api_up == 0
+        for: 10m
+        labels:
+          severity: warning
+          component: monitoring
+        annotations:
+          summary: "Service Monitor 無法存取 Docker API"
+          description: >-
+            容器狀態監控已失效（多半是 /var/run/docker.sock 未掛載進
+            Service Monitor 容器），此時容器存活告警不會再觸發。
+
+      - alert: RunnerContainerMetricMissing
+        expr: absent(tw_stock_container_up{container="gitlab-runner"})
+        for: 15m
+        labels:
+          severity: warning
+          component: monitoring
+        annotations:
+          summary: "找不到 gitlab-runner 的容器狀態指標"
+          description: >-
+            指標序列不存在，代表 MONITOR_CONTAINERS 沒有涵蓋 gitlab-runner
+            或 Service Monitor 未啟動。GitLabRunnerContainerDown 依賴這個
+            序列，序列不見時它只會安靜地不觸發——正是本次事故的失效樣態。
+
+      # ── Runner 註冊狀態 ─────────────────────────────────────────
+      # 必須併看 token_configured 與 api_up：這個 gauge 預設值是 0，且
+      # 群組查詢失敗時 collector 會直接 return、根本不會寫入它。所以
+      # 「權杖沒設」或「權杖過期／GitLab 不通」時它都會停在 0，不加條件
+      # 就會變成永久假 critical——而真正的問題已分別由 GitLabTokenMissing
+      # 與 GitLabApiUnreachable 負責。不必擔心漏報：runner 真的全掛時，
+      # GitLabRunnerContainerDown(5m) 與 GitLabRunnerOffline(15m) 仍會叫。
+      - alert: GitLabNoOnlineRunner
+        expr: >-
+          tw_stock_gitlab_runners_online_total == 0
+          and tw_stock_gitlab_token_configured == 1
+          and tw_stock_gitlab_api_up == 1
+        for: 10m
+        labels:
+          severity: critical
+          component: ci
+        annotations:
+          summary: "GitLab 沒有任何 online 的 runner"
+          description: >-
+            所有 runner 皆離線或被暫停，任何 pipeline 都不會被執行，
+            打 tag 也不會觸發部署。
+
+      - alert: GitLabRunnerOffline
+        expr: tw_stock_gitlab_runner_online == 0
+        for: 15m
+        labels:
+          severity: critical
+          component: ci
+        annotations:
+          summary: "GitLab runner {{ $labels.runner_id }} 已離線"
+          description: >-
+            GitLab 判定該 runner（{{ $labels.description }}）為 offline，
+            代表它已久未向 GitLab 取 job。
+
+      - alert: GitLabRunnerNoContact
+        expr: tw_stock_gitlab_runner_last_contact_seconds > 5400
+        for: 15m
+        labels:
+          severity: warning
+          component: ci
+        annotations:
+          summary: "GitLab runner {{ $labels.runner_id }} 超過 90 分鐘未聯繫"
+          description: >-
+            runner 的 contacted_at 已超過 90 分鐘未更新（GitLab 最多每
+            40 分鐘寫入一次，故正常值不應超過此門檻）。這是比 GitLab
+            自身 offline 判定（約 2 小時）更早的預警。
+
+      - alert: GitLabRunnerPaused
+        expr: tw_stock_gitlab_runner_paused == 1
+        for: 30m
+        labels:
+          severity: warning
+          component: ci
+        annotations:
+          summary: "GitLab runner {{ $labels.runner_id }} 處於暫停狀態"
+          description: >-
+            該 runner 被手動暫停，不會接任何 job。若非刻意為之請恢復啟用。
+
+      # ── Pipeline 與部署結果 ─────────────────────────────────────
+      - alert: GitLabJobsStuckNoMatchingRunner
+        expr: tw_stock_gitlab_failed_jobs{failure_reason="stuck_pending_no_matching_runners"} > 0
+        for: 5m
+        labels:
+          severity: critical
+          component: ci
+        annotations:
+          summary: "專案 {{ $labels.project }} 有 job 因無可用 runner 而卡住"
+          description: >-
+            failure_reason 為 stuck_pending_no_matching_runners，代表沒有
+            runner 可接這些 job——這是「基礎設施問題」而非程式碼問題，
+            重跑 pipeline 也沒用，必須先修好 runner。
+
+      - alert: GitLabPipelineFailed
+        expr: tw_stock_gitlab_pipeline_status{status="failed"} == 1
+        for: 10m
+        labels:
+          severity: warning
+          component: ci
+        annotations:
+          summary: "專案 {{ $labels.project }} 最新一條 pipeline 失敗"
+          description: >-
+            ref {{ $labels.ref }} 的 pipeline 失敗。若同時出現
+            GitLabJobsStuckNoMatchingRunner，優先處理 runner；否則多半是
+            程式碼或 CI 設定問題。
+
+      - alert: GitLabTagNotDeployed
+        expr: >-
+          tw_stock_gitlab_tag_undeployed_seconds
+          * on (project, tag) group_left (status)
+          tw_stock_gitlab_tag_pipeline_status > 1800
+        for: 10m
+        labels:
+          severity: critical
+          component: cd
+        annotations:
+          summary: "專案 {{ $labels.project }} 的 tag {{ $labels.tag }} 尚未成功部署"
+          description: >-
+            該 tag 已建立超過 30 分鐘，但部署狀態為 {{ $labels.status }}
+            （取該 tag pipeline 的 deploy job 狀態；沒有 deploy job 的專案
+            退回 pipeline 狀態，missing 代表該 tag 根本沒有產生 pipeline）。
+            線上跑的版本與 main 已脫節。
+
+      # ── 監控自身健康（避免監控靜默失效）────────────────────────
+      - alert: GitLabApiUnreachable
+        expr: tw_stock_gitlab_api_up == 0 and tw_stock_gitlab_token_configured == 1
+        for: 15m
+        labels:
+          severity: warning
+          component: monitoring
+        annotations:
+          summary: "Service Monitor 無法存取 GitLab API"
+          description: >-
+            已設定權杖但查詢失敗（GitLab 停擺、權杖過期或 scope 不足）。
+            此時所有 GitLab 來源的 CI 告警都會停止更新。
+
+      - alert: GitLabTokenMissing
+        expr: tw_stock_gitlab_token_configured == 0
+        for: 1h
+        labels:
+          severity: warning
+          component: monitoring
+        annotations:
+          summary: "未設定 GitLab API 權杖，CI 監控僅剩容器狀態"
+          description: >-
+            請提供具 read_api scope 的權杖（GITLAB_TOKEN 或
+            GITLAB_TOKEN_FILE），否則 runner 註冊狀態、pipeline 失敗與
+            tag 部署脫節等告警都不會運作。
+
+      - alert: GitLabCollectorStalled
+        expr: >-
+          (time() - tw_stock_gitlab_last_collect_timestamp_seconds > 1800)
+          and tw_stock_gitlab_token_configured == 1
+        for: 10m
+        labels:
+          severity: warning
+          component: monitoring
+        annotations:
+          summary: "GitLab CI 指標已停止更新"
+          description: >-
+            距離上次成功收集已超過 30 分鐘（預設間隔 5 分鐘），
+            CI 相關指標正在變舊，告警可能已失真。

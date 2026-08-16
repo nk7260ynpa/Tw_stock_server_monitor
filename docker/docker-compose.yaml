@@ -7,12 +7,22 @@ services:
     container_name: tw-stock-server-monitor
     volumes:
       - ../logs:/app/logs
+      # 查詢 CI 基礎設施容器（gitlab-runner / gitlab）狀態用；
+      # 這些容器不 publish port，TCP 探測不到，只能看 container state。
+      - /var/run/docker.sock:/var/run/docker.sock:ro
     expose:
       - "9102"
     environment:
       - MONITOR_METRICS_PORT=9102
       - MONITOR_CHECK_INTERVAL=30
       - MONITOR_CHECK_TIMEOUT=5
+      - MONITOR_CONTAINERS=gitlab-runner,gitlab
+      # 容器內須以 host.docker.internal 才連得到 host 上的自架 GitLab
+      - GITLAB_URL=${GITLAB_URL:-http://host.docker.internal:8080}
+      # 權杖由 host 環境變數或 docker/.env 提供，切勿寫進版本控制
+      - GITLAB_TOKEN=${GITLAB_TOKEN:-}
+      - GITLAB_GROUP_ID=${GITLAB_GROUP_ID:-38}
+      - GITLAB_CHECK_INTERVAL=300
     networks:
       - default
       - db_network
@@ -23,6 +33,7 @@ services:
     container_name: prometheus
     volumes:
       - ./prometheus/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+      - ./prometheus/rules:/etc/prometheus/rules:ro
       - prometheus_data:/prometheus
     expose:
       - "9090"

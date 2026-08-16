@@ -2,6 +2,13 @@ global:
   scrape_interval: 15s
   evaluation_interval: 15s
 
+# 告警規則檔（由 docker-compose 以唯讀方式掛載 ./prometheus/rules）
+# 觸發中的告警會以 ALERTS 序列存在 Prometheus 內，並由 Grafana 的
+# 「CI/CD 與基礎設施監控」儀表板呈現；尚未接 Alertmanager，
+# 要推播到外部管道時再於此加上 alerting.alertmanagers 設定。
+rule_files:
+  - "/etc/prometheus/rules/*.yml"
+
 scrape_configs:
   - job_name: "prometheus"
     static_configs:
@@ -17,7 +24,7 @@ scrape_configs:
     static_configs:
       - targets: ["host.docker.internal:9101"]
 
-  # Tw_stock 服務健康檢查指標
+  # Tw_stock 服務健康檢查 + CI 基礎設施指標
   - job_name: "tw-stock-monitor"
     static_configs:
       - targets: ["tw-stock-server-monitor:9102"]

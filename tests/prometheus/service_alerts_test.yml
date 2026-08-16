@@ -1,0 +1,129 @@
+# 服務與監控自身健康告警規則的單元測試（promtool test rules）
+#
+# 執行方式（於 repo 根目錄）：
+#   docker run --rm -v "$(pwd)":/work -w /work --entrypoint promtool \
+#     prom/prometheus:latest test rules tests/prometheus/service_alerts_test.yml
+
+rule_files:
+  - ../../docker/prometheus/rules/service_alerts.yml
+
+evaluation_interval: 1m
+
+tests:
+  - interval: 1m
+    name: 微服務 TCP 探測連續失敗時應告警
+    input_series:
+      - series: 'tw_stock_service_up{service="db_operating",host="tw_stock_db_operating",port="8080"}'
+        values: "1 1 0+0x30"
+      - series: 'tw_stock_service_up{service="crawler",host="tw_stocker_crawler",port="6738"}'
+        values: "1+0x30"
+    alert_rule_test:
+      - eval_time: 4m
+        alertname: TwStockServiceDown
+        exp_alerts: []
+      - eval_time: 20m
+        alertname: TwStockServiceDown
+        exp_alerts:
+          - exp_labels:
+              service: db_operating
+              host: tw_stock_db_operating
+              port: "8080"
+              severity: critical
+              component: service
+            exp_annotations:
+              summary: "服務 db_operating 無法連線"
+              description: >-
+                對 tw_stock_db_operating:8080 的 TCP 探測連續失敗超過
+                5 分鐘，該 Tw_stock 微服務可能已停止或網路不通。
+
+  - interval: 1m
+    name: Prometheus 抓取目標失效時應告警
+    input_series:
+      - series: 'up{job="tw-stock-monitor",instance="tw-stock-server-monitor:9102"}'
+        values: "0+0x30"
+    alert_rule_test:
+      - eval_time: 25m
+        alertname: PrometheusTargetDown
+        exp_alerts:
+          - exp_labels:
+              job: tw-stock-monitor
+              instance: tw-stock-server-monitor:9102
+              severity: warning
+              component: monitoring
+            exp_annotations:
+              summary: "Prometheus 抓取目標 tw-stock-monitor 失效"
+              description: >-
+                Prometheus 已連續 10 分鐘抓不到 tw-stock-server-monitor:9102，
+                該來源的所有指標與告警都已停止更新。
+
+  - interval: 1m
+    name: Service Monitor 指標完全消失時應告警
+    input_series:
+      - series: 'up{job="tw-stock-monitor",instance="tw-stock-server-monitor:9102"}'
+        values: "0+0x30"
+    alert_rule_test:
+      - eval_time: 25m
+        alertname: ServiceMonitorMetricsMissing
+        exp_alerts:
+          - exp_labels:
+              severity: critical
+              component: monitoring
+            exp_annotations:
+              summary: "Service Monitor 指標完全消失"
+              description: >-
+                找不到任何 tw_stock_service_up 序列，代表 Service Monitor 容器
+                已停止或 Prometheus 設定有誤——此時服務與 CI 告警都不會再觸發。
+
+  - interval: 1m
+    name: 健康檢查迴圈停擺時應告警
+    input_series:
+      # 時間戳停在測試起點，隨評估時間推進而變舊；
+      # 期間 tw_stock_service_up 仍停在 1（gauge 不會過期），
+      # 若沒有這條告警就完全看不出監控已靜默失效。
+      - series: "tw_stock_last_check_timestamp_seconds"
+        values: "0+0x40"
+      - series: 'tw_stock_service_up{service="crawler",host="tw_stocker_crawler",port="6738"}'
+        values: "1+0x40"
+    alert_rule_test:
+      - eval_time: 3m
+        alertname: ServiceMonitorCheckStalled
+        exp_alerts: []
+      - eval_time: 20m
+        alertname: ServiceMonitorCheckStalled
+        exp_alerts:
+          - exp_labels:
+              severity: critical
+              component: monitoring
+            exp_annotations:
+              summary: "Service Monitor 健康檢查迴圈已停擺"
+              description: >-
+                主循環超過 5 分鐘沒有完成一輪檢查（預設間隔 30 秒）。Gauge 不會
+                過期，此時 tw_stock_service_up 會停在舊值，服務真的掛掉也不會
+                告警——監控本身正在靜默失效。
+      - eval_time: 20m
+        alertname: TwStockServiceDown
+        exp_alerts: []
+
+  - interval: 1m
+    name: 一切正常時不應有任何告警
+    input_series:
+      - series: 'tw_stock_service_up{service="crawler",host="tw_stocker_crawler",port="6738"}'
+        values: "1+0x30"
+      - series: 'up{job="tw-stock-monitor",instance="tw-stock-server-monitor:9102"}'
+        values: "1+0x30"
+      # 檢查迴圈持續推進（每分鐘 60 秒），不應觸發停擺告警
+      - series: "tw_stock_last_check_timestamp_seconds"
+        values: "0+60x30"
+    alert_rule_test:
+      - eval_time: 25m
+        alertname: TwStockServiceDown
+        exp_alerts: []
+      - eval_time: 25m
+        alertname: PrometheusTargetDown
+        exp_alerts: []
+      - eval_time: 25m
+        alertname: ServiceMonitorMetricsMissing
+        exp_alerts: []
+      - eval_time: 25m
+        alertname: ServiceMonitorCheckStalled
+        exp_alerts: []

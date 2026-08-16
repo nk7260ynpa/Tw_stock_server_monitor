@@ -58,6 +58,13 @@ deploy:
     CONTAINER: "tw-stock-server-monitor"          # 只動這顆 Service Monitor 容器
     LOGS_VOLUME: "tw-stock-server-monitor_logs"   # 具名 volume（取代 compose 的相對 bind）
     LOGS_PATH: "/app/logs"
+    MONITOR_CONTAINERS: "gitlab-runner,gitlab"    # CI 基礎設施容器存活監控對象
+    MONITOR_GITLAB_URL: "http://host.docker.internal:8080"  # 容器內連 host 上的 GitLab
+    MONITOR_GITLAB_GROUP_ID: "38"                 # twstock 群組
+    # MONITOR_GITLAB_TOKEN 為具 read_api scope 的權杖，
+    # 須在 GitLab 專案 Settings → CI/CD → Variables 設為 masked 變數，
+    # 切勿寫在本檔。未設定時 GitLab CI 監控會停用，並由
+    # GitLabTokenMissing 告警提醒（不會靜默失效）。
   before_script:
     # 由 tag 推導不含前綴 v 的版本號（vX.Y.Z → X.Y.Z）
     - export VERSION="${CI_COMMIT_TAG#v}"
@@ -74,15 +81,23 @@ deploy:
     #    --network db_network：對其他服務做 TCP 探測，且讓 Prometheus 以
     #    容器名於 db_network 抓取 9102 指標。
     #    --expose 9102：僅容器內部暴露（不對外 publish），與 compose 一致。
+    #    掛載 docker.sock（唯讀）：監控 gitlab-runner 等不 publish port 的
+    #    CI 容器是否存活，TCP 探測對它們無效。
     - docker run -d
         --name "$CONTAINER"
         --restart=always
         --network db_network
         --volume "$LOGS_VOLUME:$LOGS_PATH"
+        --volume /var/run/docker.sock:/var/run/docker.sock:ro
         --expose 9102
         -e MONITOR_METRICS_PORT=9102
         -e MONITOR_CHECK_INTERVAL=30
         -e MONITOR_CHECK_TIMEOUT=5
+        -e MONITOR_CONTAINERS="$MONITOR_CONTAINERS"
+        -e GITLAB_URL="$MONITOR_GITLAB_URL"
+        -e GITLAB_GROUP_ID="$MONITOR_GITLAB_GROUP_ID"
+        -e GITLAB_CHECK_INTERVAL=300
+        -e GITLAB_TOKEN="$MONITOR_GITLAB_TOKEN"
         "$IMAGE:latest"
     # 4) 清掉懸置 image，避免 host 上 dangling image 堆積。
     - docker image prune -f || true

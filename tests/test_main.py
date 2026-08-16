@@ -168,5 +168,53 @@ class TestSignalHandler(unittest.TestCase):
         main_module._running = True
 
 
+class TestGitLabLoop(unittest.TestCase):
+    """測試 GitLab 收集迴圈。
+
+    GitLab 收集必須與主循環隔離：其 API 慢或逾時時，TCP 探測不能跟著停擺，
+    否則服務真的掛掉也不會告警（Gauge 不會過期，會停在舊值）。
+    """
+
+    def test_loop_runs_until_stopped(self):
+        """`_running` 轉為 False 後迴圈應結束。"""
+        import src.main as main_module
+
+        calls = []
+
+        def fake_collect(logger, client, group_id, window_hours=None):
+            calls.append(group_id)
+            main_module._running = False
+            return True
+
+        main_module._running = True
+        with patch("src.main.collect_gitlab_ci", side_effect=fake_collect):
+            main_module.run_gitlab_loop(
+                MagicMock(), MagicMock(), "38", 300, 24
+            )
+
+        self.assertEqual(calls, ["38"])
+        main_module._running = True
+
+    def test_loop_survives_unexpected_error(self):
+        """收集拋出未預期例外時應記錄並繼續，不可讓執行緒死掉。"""
+        import src.main as main_module
+
+        logger = MagicMock()
+        state = {"count": 0}
+
+        def boom(*args, **kwargs):
+            state["count"] += 1
+            main_module._running = False
+            raise RuntimeError("爆炸")
+
+        main_module._running = True
+        with patch("src.main.collect_gitlab_ci", side_effect=boom):
+            main_module.run_gitlab_loop(logger, MagicMock(), "38", 1, 24)
+
+        self.assertEqual(state["count"], 1)
+        logger.exception.assert_called()
+        main_module._running = True
+
+
 if __name__ == "__main__":
     unittest.main()
