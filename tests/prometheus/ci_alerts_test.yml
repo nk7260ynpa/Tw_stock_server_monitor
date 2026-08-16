@@ -1,0 +1,337 @@
+# CI 基礎設施告警規則的單元測試（promtool test rules）
+#
+# 執行方式（於 repo 根目錄）：
+#   docker run --rm -v "$(pwd)":/work -w /work --entrypoint promtool \
+#     prom/prometheus:latest test rules tests/prometheus/ci_alerts_test.yml
+#
+# 每個測試都刻意重現 2026-07/08 事故的訊號，確認告警「真的會觸發」，
+# 並同時驗證正常狀態下「不會誤報」。
+
+rule_files:
+  - ../../docker/prometheus/rules/ci_alerts.yml
+
+evaluation_interval: 1m
+
+tests:
+  # ── 容器存活 ──────────────────────────────────────────────────
+  - interval: 1m
+    name: gitlab-runner 容器 Exit 0 後應告警
+    input_series:
+      - series: 'tw_stock_container_up{container="gitlab-runner"}'
+        values: "1 1 0+0x30"
+      - series: 'tw_stock_container_state{container="gitlab-runner",state="exited"}'
+        values: "0 0 1+0x30"
+    alert_rule_test:
+      - eval_time: 4m
+        alertname: GitLabRunnerContainerDown
+        exp_alerts: []
+      - eval_time: 20m
+        alertname: GitLabRunnerContainerDown
+        exp_alerts:
+          - exp_labels:
+              container: gitlab-runner
+              severity: critical
+              component: ci
+            exp_annotations:
+              summary: "GitLab Runner 容器未在執行，CI 已停擺"
+              description: >-
+                gitlab-runner 容器目前不是 running 狀態。對常駐服務而言
+                Exit 0 同樣是異常：restart policy 為 unless-stopped 時，
+                容器被明確 stop 過就不會自動拉起，CI job 會全部卡在 pending
+                但不影響任何對外 port，極易無聲無息。
+              runbook: >-
+                docker start gitlab-runner；並確認 GitLab 本體（container: gitlab）
+                是否正常回應，2026-07 那次即為 GitLab 回 502 後 runner 收到
+                stop signal 正常退出。
+
+  - interval: 1m
+    name: gitlab-runner 正常執行時不應告警
+    input_series:
+      - series: 'tw_stock_container_up{container="gitlab-runner"}'
+        values: "1+0x30"
+    alert_rule_test:
+      - eval_time: 25m
+        alertname: GitLabRunnerContainerDown
+        exp_alerts: []
+
+  - interval: 1m
+    name: GitLab 本體停止時應告警
+    input_series:
+      - series: 'tw_stock_container_up{container="gitlab"}'
+        values: "0+0x30"
+    alert_rule_test:
+      - eval_time: 25m
+        alertname: CIContainerDown
+        exp_alerts:
+          - exp_labels:
+              container: gitlab
+              severity: warning
+              component: ci
+            exp_annotations:
+              summary: "受監控容器 gitlab 未在執行"
+              description: >-
+                該容器不是 running 狀態。GitLab 本體停擺會連帶讓 runner 空轉，
+                最終導致 CI 停擺。
+
+  - interval: 1m
+    name: Docker socket 未掛載時應告警
+    input_series:
+      - series: "tw_stock_docker_api_up"
+        values: "0+0x30"
+    alert_rule_test:
+      - eval_time: 25m
+        alertname: DockerApiUnreachable
+        exp_alerts:
+          - exp_labels:
+              severity: warning
+              component: monitoring
+            exp_annotations:
+              summary: "Service Monitor 無法存取 Docker API"
+              description: >-
+                容器狀態監控已失效（多半是 /var/run/docker.sock 未掛載進
+                Service Monitor 容器），此時容器存活告警不會再觸發。
+
+  # ── Runner 註冊狀態 ───────────────────────────────────────────
+  - interval: 1m
+    name: 沒有任何 online runner 時應告警
+    input_series:
+      - series: "tw_stock_gitlab_runners_online_total"
+        values: "1 1 0+0x30"
+    alert_rule_test:
+      - eval_time: 25m
+        alertname: GitLabNoOnlineRunner
+        exp_alerts:
+          - exp_labels:
+              severity: critical
+              component: ci
+            exp_annotations:
+              summary: "GitLab 沒有任何 online 的 runner"
+              description: >-
+                所有 runner 皆離線或被暫停，任何 pipeline 都不會被執行，
+                打 tag 也不會觸發部署。
+
+  - interval: 1m
+    name: runner 被 GitLab 判定 offline 時應告警
+    input_series:
+      - series: 'tw_stock_gitlab_runner_online{runner_id="1",description="All-project-runner"}'
+        values: "0+0x40"
+    alert_rule_test:
+      - eval_time: 10m
+        alertname: GitLabRunnerOffline
+        exp_alerts: []
+      - eval_time: 30m
+        alertname: GitLabRunnerOffline
+        exp_alerts:
+          - exp_labels:
+              runner_id: "1"
+              description: All-project-runner
+              severity: critical
+              component: ci
+            exp_annotations:
+              summary: "GitLab runner 1 已離線"
+              description: >-
+                GitLab 判定該 runner（All-project-runner）為 offline，
+                代表它已久未向 GitLab 取 job。
+
+  - interval: 1m
+    name: runner 超過 90 分鐘未聯繫時應告警，40 分鐘內屬正常
+    input_series:
+      # GitLab 最多每 40 分鐘才寫入一次 contacted_at，2400 秒屬健康值
+      - series: 'tw_stock_gitlab_runner_last_contact_seconds{runner_id="1",description="All-project-runner"}'
+        values: "2400+0x10 6000+0x30"
+    alert_rule_test:
+      - eval_time: 8m
+        alertname: GitLabRunnerNoContact
+        exp_alerts: []
+      - eval_time: 40m
+        alertname: GitLabRunnerNoContact
+        exp_alerts:
+          - exp_labels:
+              runner_id: "1"
+              description: All-project-runner
+              severity: warning
+              component: ci
+            exp_annotations:
+              summary: "GitLab runner 1 超過 90 分鐘未聯繫"
+              description: >-
+                runner 的 contacted_at 已超過 90 分鐘未更新（GitLab 最多每
+                40 分鐘寫入一次，故正常值不應超過此門檻）。這是比 GitLab
+                自身 offline 判定（約 2 小時）更早的預警。
+
+  - interval: 1m
+    name: runner 被暫停時應告警
+    input_series:
+      - series: 'tw_stock_gitlab_runner_paused{runner_id="1",description="All-project-runner"}'
+        values: "1+0x60"
+    alert_rule_test:
+      - eval_time: 45m
+        alertname: GitLabRunnerPaused
+        exp_alerts:
+          - exp_labels:
+              runner_id: "1"
+              description: All-project-runner
+              severity: warning
+              component: ci
+            exp_annotations:
+              summary: "GitLab runner 1 處於暫停狀態"
+              description: >-
+                該 runner 被手動暫停，不會接任何 job。若非刻意為之請恢復啟用。
+
+  # ── Pipeline 與部署結果 ───────────────────────────────────────
+  - interval: 1m
+    name: job 因無可用 runner 卡住時應告警，且與程式碼失敗可區分
+    input_series:
+      - series: 'tw_stock_gitlab_failed_jobs{project="Tw_stock_DB_Operating",failure_reason="stuck_pending_no_matching_runners"}'
+        values: "4+0x30"
+      # script_failure 屬程式碼問題，不應觸發基礎設施告警
+      - series: 'tw_stock_gitlab_failed_jobs{project="Tw_stock_DB_Operating",failure_reason="script_failure"}'
+        values: "1+0x30"
+    alert_rule_test:
+      - eval_time: 20m
+        alertname: GitLabJobsStuckNoMatchingRunner
+        exp_alerts:
+          - exp_labels:
+              project: Tw_stock_DB_Operating
+              failure_reason: stuck_pending_no_matching_runners
+              severity: critical
+              component: ci
+            exp_annotations:
+              summary: "專案 Tw_stock_DB_Operating 有 job 因無可用 runner 而卡住"
+              description: >-
+                failure_reason 為 stuck_pending_no_matching_runners，代表沒有
+                runner 可接這些 job——這是「基礎設施問題」而非程式碼問題，
+                重跑 pipeline 也沒用，必須先修好 runner。
+
+  - interval: 1m
+    name: 只有 script_failure 時不應觸發基礎設施告警
+    input_series:
+      - series: 'tw_stock_gitlab_failed_jobs{project="Tw_stock_DB_Operating",failure_reason="script_failure"}'
+        values: "3+0x30"
+    alert_rule_test:
+      - eval_time: 20m
+        alertname: GitLabJobsStuckNoMatchingRunner
+        exp_alerts: []
+
+  - interval: 1m
+    name: 最新 pipeline 失敗時應告警
+    input_series:
+      - series: 'tw_stock_gitlab_pipeline_status{project="Tw_stock_DB_Operating",ref="v2.13.0",status="failed"}'
+        values: "1+0x30"
+      - series: 'tw_stock_gitlab_pipeline_status{project="Tw_stock_crawer",ref="v2.13.0",status="success"}'
+        values: "1+0x30"
+    alert_rule_test:
+      - eval_time: 20m
+        alertname: GitLabPipelineFailed
+        exp_alerts:
+          - exp_labels:
+              project: Tw_stock_DB_Operating
+              ref: v2.13.0
+              status: failed
+              severity: warning
+              component: ci
+            exp_annotations:
+              summary: "專案 Tw_stock_DB_Operating 最新一條 pipeline 失敗"
+              description: >-
+                ref v2.13.0 的 pipeline 失敗。若同時出現
+                GitLabJobsStuckNoMatchingRunner，優先處理 runner；否則多半是
+                程式碼或 CI 設定問題。
+
+  - interval: 1m
+    name: tag 打了卻沒成功部署超過 30 分鐘時應告警
+    input_series:
+      # 事故重現：tag 已建立 3 小時，pipeline 卻卡住失敗
+      - series: 'tw_stock_gitlab_tag_undeployed_seconds{project="Tw_stock_DB_Operating",tag="v2.13.0"}'
+        values: "10800+60x30"
+      - series: 'tw_stock_gitlab_tag_pipeline_status{project="Tw_stock_DB_Operating",tag="v2.13.0",status="failed"}'
+        values: "1+0x30"
+      # 正常部署的專案不應告警
+      - series: 'tw_stock_gitlab_tag_undeployed_seconds{project="Tw_stock_crawer",tag="v2.13.0"}'
+        values: "0+0x30"
+      - series: 'tw_stock_gitlab_tag_pipeline_status{project="Tw_stock_crawer",tag="v2.13.0",status="success"}'
+        values: "1+0x30"
+    alert_rule_test:
+      - eval_time: 20m
+        alertname: GitLabTagNotDeployed
+        exp_alerts:
+          - exp_labels:
+              project: Tw_stock_DB_Operating
+              tag: v2.13.0
+              status: failed
+              severity: critical
+              component: cd
+            exp_annotations:
+              summary: "專案 Tw_stock_DB_Operating 的 tag v2.13.0 尚未成功部署"
+              description: >-
+                該 tag 已建立超過 30 分鐘，但對應 pipeline 狀態為
+                failed（success 以外皆視為未部署，missing 代表
+                該 tag 根本沒有產生 pipeline）。線上跑的版本與 main 已脫節。
+
+  # ── 監控自身健康 ──────────────────────────────────────────────
+  - interval: 1m
+    name: 有權杖但連不上 GitLab 時應告警
+    input_series:
+      - series: "tw_stock_gitlab_api_up"
+        values: "0+0x40"
+      - series: "tw_stock_gitlab_token_configured"
+        values: "1+0x40"
+    alert_rule_test:
+      - eval_time: 30m
+        alertname: GitLabApiUnreachable
+        exp_alerts:
+          - exp_labels:
+              severity: warning
+              component: monitoring
+            exp_annotations:
+              summary: "Service Monitor 無法存取 GitLab API"
+              description: >-
+                已設定權杖但查詢失敗（GitLab 停擺、權杖過期或 scope 不足）。
+                此時所有 GitLab 來源的 CI 告警都會停止更新。
+      - eval_time: 30m
+        alertname: GitLabTokenMissing
+        exp_alerts: []
+
+  - interval: 1m
+    name: 未設定權杖時應告警，且不誤報為 API 連線失敗
+    input_series:
+      - series: "tw_stock_gitlab_api_up"
+        values: "0+0x120"
+      - series: "tw_stock_gitlab_token_configured"
+        values: "0+0x120"
+    alert_rule_test:
+      - eval_time: 90m
+        alertname: GitLabTokenMissing
+        exp_alerts:
+          - exp_labels:
+              severity: warning
+              component: monitoring
+            exp_annotations:
+              summary: "未設定 GitLab API 權杖，CI 監控僅剩容器狀態"
+              description: >-
+                請提供具 read_api scope 的權杖（GITLAB_TOKEN 或
+                GITLAB_TOKEN_FILE），否則 runner 註冊狀態、pipeline 失敗與
+                tag 部署脫節等告警都不會運作。
+      - eval_time: 90m
+        alertname: GitLabApiUnreachable
+        exp_alerts: []
+
+  - interval: 1m
+    name: GitLab 指標停止更新時應告警
+    input_series:
+      # 時間戳停在測試起點，隨評估時間推進而變舊
+      - series: "tw_stock_gitlab_last_collect_timestamp_seconds"
+        values: "0+0x90"
+    alert_rule_test:
+      - eval_time: 20m
+        alertname: GitLabCollectorStalled
+        exp_alerts: []
+      - eval_time: 60m
+        alertname: GitLabCollectorStalled
+        exp_alerts:
+          - exp_labels:
+              severity: warning
+              component: monitoring
+            exp_annotations:
+              summary: "GitLab CI 指標已停止更新"
+              description: >-
+                距離上次成功收集已超過 30 分鐘（預設間隔 5 分鐘），
+                CI 相關指標正在變舊，告警可能已失真。
