@@ -59,12 +59,31 @@ groups:
             容器狀態監控已失效（多半是 /var/run/docker.sock 未掛載進
             Service Monitor 容器），此時容器存活告警不會再觸發。
 
+      - alert: RunnerContainerMetricMissing
+        expr: absent(tw_stock_container_up{container="gitlab-runner"})
+        for: 15m
+        labels:
+          severity: warning
+          component: monitoring
+        annotations:
+          summary: "找不到 gitlab-runner 的容器狀態指標"
+          description: >-
+            指標序列不存在，代表 MONITOR_CONTAINERS 沒有涵蓋 gitlab-runner
+            或 Service Monitor 未啟動。GitLabRunnerContainerDown 依賴這個
+            序列，序列不見時它只會安靜地不觸發——正是本次事故的失效樣態。
+
       # ── Runner 註冊狀態 ─────────────────────────────────────────
-      # 必須併看 token_configured：未設定權杖時 collector 完全不會執行，
-      # gauge 會停在預設值 0，若不加此條件會變成永久假 critical
-      # （真正的問題是「權杖沒設」，已由 GitLabTokenMissing 負責）。
+      # 必須併看 token_configured 與 api_up：這個 gauge 預設值是 0，且
+      # 群組查詢失敗時 collector 會直接 return、根本不會寫入它。所以
+      # 「權杖沒設」或「權杖過期／GitLab 不通」時它都會停在 0，不加條件
+      # 就會變成永久假 critical——而真正的問題已分別由 GitLabTokenMissing
+      # 與 GitLabApiUnreachable 負責。不必擔心漏報：runner 真的全掛時，
+      # GitLabRunnerContainerDown(5m) 與 GitLabRunnerOffline(15m) 仍會叫。
       - alert: GitLabNoOnlineRunner
-        expr: tw_stock_gitlab_runners_online_total == 0 and tw_stock_gitlab_token_configured == 1
+        expr: >-
+          tw_stock_gitlab_runners_online_total == 0
+          and tw_stock_gitlab_token_configured == 1
+          and tw_stock_gitlab_api_up == 1
         for: 10m
         labels:
           severity: critical

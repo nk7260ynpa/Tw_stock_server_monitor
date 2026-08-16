@@ -91,6 +91,42 @@ tests:
                 容器狀態監控已失效（多半是 /var/run/docker.sock 未掛載進
                 Service Monitor 容器），此時容器存活告警不會再觸發。
 
+  - interval: 1m
+    name: 沒有 gitlab-runner 容器指標時應告警（監控被停用也要看得見）
+    input_series:
+      # 只有別的容器有指標，gitlab-runner 的序列不存在：
+      # 這時 GitLabRunnerContainerDown 只會安靜地不觸發。
+      - series: 'tw_stock_container_up{container="gitlab"}'
+        values: "1+0x30"
+    alert_rule_test:
+      - eval_time: 25m
+        alertname: RunnerContainerMetricMissing
+        exp_alerts:
+          # absent() 會把比對用的 label 帶進告警
+          - exp_labels:
+              severity: warning
+              component: monitoring
+              container: gitlab-runner
+            exp_annotations:
+              summary: "找不到 gitlab-runner 的容器狀態指標"
+              description: >-
+                指標序列不存在，代表 MONITOR_CONTAINERS 沒有涵蓋 gitlab-runner
+                或 Service Monitor 未啟動。GitLabRunnerContainerDown 依賴這個
+                序列，序列不見時它只會安靜地不觸發——正是本次事故的失效樣態。
+      - eval_time: 25m
+        alertname: GitLabRunnerContainerDown
+        exp_alerts: []
+
+  - interval: 1m
+    name: gitlab-runner 指標存在時不應觸發 metric missing
+    input_series:
+      - series: 'tw_stock_container_up{container="gitlab-runner"}'
+        values: "1+0x30"
+    alert_rule_test:
+      - eval_time: 25m
+        alertname: RunnerContainerMetricMissing
+        exp_alerts: []
+
   # ── Runner 註冊狀態 ───────────────────────────────────────────
   - interval: 1m
     name: 沒有任何 online runner 時應告警
@@ -98,6 +134,8 @@ tests:
       - series: "tw_stock_gitlab_runners_online_total"
         values: "1 1 0+0x30"
       - series: "tw_stock_gitlab_token_configured"
+        values: "1+0x30"
+      - series: "tw_stock_gitlab_api_up"
         values: "1+0x30"
     alert_rule_test:
       - eval_time: 25m
@@ -335,6 +373,33 @@ tests:
       - eval_time: 90m
         alertname: GitLabCollectorStalled
         exp_alerts: []
+
+  - interval: 1m
+    name: 權杖過期或 GitLab 不通時不可誤報成「沒有 online runner」
+    input_series:
+      # 群組查詢失敗時 collector 直接 return，runners_online_total 不會被
+      # 寫入而停在 0；真正的原因是 API 連不上，應由 GitLabApiUnreachable 反映。
+      - series: "tw_stock_gitlab_token_configured"
+        values: "1+0x120"
+      - series: "tw_stock_gitlab_api_up"
+        values: "0+0x120"
+      - series: "tw_stock_gitlab_runners_online_total"
+        values: "0+0x120"
+    alert_rule_test:
+      - eval_time: 90m
+        alertname: GitLabNoOnlineRunner
+        exp_alerts: []
+      - eval_time: 90m
+        alertname: GitLabApiUnreachable
+        exp_alerts:
+          - exp_labels:
+              severity: warning
+              component: monitoring
+            exp_annotations:
+              summary: "Service Monitor 無法存取 GitLab API"
+              description: >-
+                已設定權杖但查詢失敗（GitLab 停擺、權杖過期或 scope 不足）。
+                此時所有 GitLab 來源的 CI 告警都會停止更新。
 
   - interval: 1m
     name: GitLab 指標停止更新時應告警

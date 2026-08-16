@@ -487,6 +487,9 @@ def fetch_project_state(client, project, now,
     tag = _select_latest_tag(tags)
     if tag:
         tag_name = tag.get("name") or ""
+        # tags API 只有 annotated tag 才有 created_at，多數情況會退到
+        # commit.created_at＝該 commit 的時間。對舊 commit 補打 tag 時，
+        # undeployed 秒數會偏大、告警提早響；方向偏保守，可接受。
         tag_time = parse_iso_timestamp(
             tag.get("created_at") or (tag.get("commit") or {}).get("created_at")
         )

@@ -287,7 +287,8 @@ TCP 探測不到**的 CI 容器。監控對象由 `MONITOR_CONTAINERS` 指定，
 | `GitLabRunnerContainerDown` | critical | gitlab-runner 容器非 running（5m） |
 | `CIContainerDown` | warning | 其他受監控 CI 容器非 running（10m） |
 | `DockerApiUnreachable` | warning | 無法存取 Docker API（10m） |
-| `GitLabNoOnlineRunner` | critical | online runner 數為 0（10m） |
+| `RunnerContainerMetricMissing` | warning | 查不到 gitlab-runner 容器指標（15m） |
+| `GitLabNoOnlineRunner` | critical | 已設權杖且 API 正常，但 online runner 數為 0（10m） |
 | `GitLabRunnerOffline` | critical | 個別 runner 被 GitLab 判定 offline（15m） |
 | `GitLabRunnerNoContact` | warning | runner 逾 90 分鐘未聯繫（15m） |
 | `GitLabRunnerPaused` | warning | runner 被暫停（30m） |
@@ -309,6 +310,15 @@ TCP 探測不到**的 CI 容器。監控對象由 `MONITOR_CONTAINERS` 指定，
 > `ServiceMonitorMetricsMissing` 抓「監控整個不見了」，
 > `ServiceMonitorCheckStalled` 抓「監控還在但已經不動了」——Gauge 不會過期，
 > 主循環卡住時舊值會一直看起來是健康的，這正是本次事故「無聲失效」的同型風險。
+> `RunnerContainerMetricMissing` 則補「序列根本不存在」這個缺口：
+> `GitLabRunnerContainerDown` 依賴 `tw_stock_container_up` 序列，一旦
+> `MONITOR_CONTAINERS` 漏掉 gitlab-runner，它只會安靜地不觸發。
+>
+> 依賴 GitLab API 的告警（`GitLabNoOnlineRunner`、`GitLabCollectorStalled`）
+> 都以 `tw_stock_gitlab_token_configured` / `tw_stock_gitlab_api_up` 當閘門。
+> 這些 Gauge 預設值是 0，且 API 失敗時 collector 直接 return、不會寫入，
+> 沒有閘門就會在「權杖沒設」或「權杖過期」時永久假 critical，蓋掉真訊號；
+> 真正的原因由 `GitLabTokenMissing` 與 `GitLabApiUnreachable` 各自負責。
 
 ### 設定 GitLab API 權杖
 
@@ -409,7 +419,9 @@ docker compose -f docker/docker-compose.yaml down -v
 
 規則檔以 bind mount 掛進 Prometheus（`./prometheus/rules:/etc/prometheus/rules:ro`）。
 **CI 的 `deploy` job 只重啟 Service Monitor，不會動 Prometheus**，因此新增或
-修改規則後需手動讓 Prometheus 重新載入：
+修改規則後需手動讓 Prometheus 重新載入。**首次導入告警規則時這一步是必要的**：
+在執行之前 `/api/v1/rules` 會回 `{"groups":[]}`，等於一條告警都沒有——正是本套
+規則要消滅的無聲狀態，務必實際確認載入結果：
 
 ```bash
 # 首次新增掛載點時必須重建容器
@@ -427,6 +439,10 @@ docker exec prometheus wget -qO- http://localhost:9090/api/v1/rules | head
 ### Python 單元測試
 
 ```bash
+# 先建 image：DockerHub 上的 :latest 可能還沒有最新依賴（例如 requests），
+# 直接拿舊 image 跑會噴 ModuleNotFoundError。
+bash docker/build.sh
+
 docker run --rm -v "$(pwd)":/app -w /app nk7260ynpa/tw-stock-monitor:latest \
   python -m pytest tests/ -v
 ```
