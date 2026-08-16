@@ -16,6 +16,7 @@
 import os
 import signal
 import socket
+import threading
 import time
 
 from prometheus_client import Gauge, start_http_server
@@ -75,6 +76,15 @@ service_response_time = Gauge(
     "tw_stock_service_response_time_seconds",
     "Tw_stock 服務 TCP 連線回應時間（秒）",
     ["service", "host", "port"],
+    registry=registry,
+)
+
+# 最近一次完成健康檢查循環的時間（Unix epoch 秒）
+# Gauge 不會 stale，主循環卡住時舊值會一直被抓到，必須靠這個指標才看得出
+# 「監控自己不動了」——這正是本次事故的失敗模式。
+last_check_timestamp = Gauge(
+    "tw_stock_last_check_timestamp_seconds",
+    "最近一次完成服務與容器健康檢查的時間（Unix epoch 秒）",
     registry=registry,
 )
 
@@ -216,12 +226,36 @@ def build_gitlab_client(logger):
     return GitLabClient(base_url=url, token=token, timeout=timeout)
 
 
+def run_gitlab_loop(logger, client, group_id, interval, window_hours):
+    """GitLab CI 指標收集迴圈（於獨立執行緒執行）。
+
+    GitLab 端要對群組內每個專案發數次請求，最壞情況（GitLab 無回應且每次
+    都等到逾時）可能阻塞數分鐘。若與 TCP 探測共用同一個迴圈，服務健康檢查
+    會跟著停擺且毫無徵兆，故拆成獨立執行緒。
+
+    Args:
+        logger: Logger 實例。
+        client: `GitLabClient` 實例。
+        group_id: 要掃描的 GitLab 群組 ID。
+        interval: 收集間隔（秒）。
+        window_hours: 失敗 job 統計窗口（小時）。
+    """
+    while _running:
+        try:
+            collect_gitlab_ci(
+                logger, client, group_id, window_hours=window_hours
+            )
+        except Exception:
+            logger.exception("收集 GitLab CI 指標時發生未預期錯誤")
+        _interruptible_sleep(interval)
+
+
 def main():
     """主程式進入點。
 
-    啟動 Prometheus metrics HTTP 伺服器，並以固定間隔持續收集服務健康
-    狀態、CI 基礎設施容器狀態與 GitLab CI 指標。收到 SIGTERM/SIGINT
-    時優雅關閉。
+    啟動 Prometheus metrics HTTP 伺服器，主循環以固定間隔收集服務健康狀態
+    與 CI 基礎設施容器狀態；GitLab CI 指標則由獨立執行緒以較長間隔收集
+    （API 較慢，不可拖住主循環）。收到 SIGTERM/SIGINT 時優雅關閉。
     """
     global _running
 
@@ -264,8 +298,17 @@ def main():
     logger.info("GitLab CI 指標收集間隔 %d 秒（群組 %s）",
                 gitlab_interval, gitlab_group)
 
-    # 主循環：定期收集各項指標
-    next_gitlab_check = 0.0
+    # GitLab 收集另起執行緒，避免其逾時拖住服務健康檢查
+    if gitlab_client is not None:
+        threading.Thread(
+            target=run_gitlab_loop,
+            args=(logger, gitlab_client, gitlab_group, gitlab_interval,
+                  gitlab_window),
+            name="gitlab-collector",
+            daemon=True,
+        ).start()
+
+    # 主循環：定期收集服務與容器指標
     while _running:
         try:
             collect_service_health(logger, timeout)
@@ -277,16 +320,7 @@ def main():
         except Exception:
             logger.exception("收集容器狀態時發生未預期錯誤")
 
-        if gitlab_client is not None and time.monotonic() >= next_gitlab_check:
-            try:
-                collect_gitlab_ci(
-                    logger, gitlab_client, gitlab_group,
-                    window_hours=gitlab_window,
-                )
-            except Exception:
-                logger.exception("收集 GitLab CI 指標時發生未預期錯誤")
-            next_gitlab_check = time.monotonic() + gitlab_interval
-
+        last_check_timestamp.set(time.time())
         _interruptible_sleep(interval)
 
     logger.info("台股伺服器監控結束")

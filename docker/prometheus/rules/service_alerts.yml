@@ -45,3 +45,16 @@ groups:
           description: >-
             找不到任何 tw_stock_service_up 序列，代表 Service Monitor 容器
             已停止或 Prometheus 設定有誤——此時服務與 CI 告警都不會再觸發。
+
+      - alert: ServiceMonitorCheckStalled
+        expr: time() - tw_stock_last_check_timestamp_seconds > 300
+        for: 5m
+        labels:
+          severity: critical
+          component: monitoring
+        annotations:
+          summary: "Service Monitor 健康檢查迴圈已停擺"
+          description: >-
+            主循環超過 5 分鐘沒有完成一輪檢查（預設間隔 30 秒）。Gauge 不會
+            過期，此時 tw_stock_service_up 會停在舊值，服務真的掛掉也不會
+            告警——監控本身正在靜默失效。
