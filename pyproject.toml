@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "tw-stock-server-monitor"
-version = "1.0.0"
+version = "1.2.0"
 description = "台股伺服器監控 — Prometheus + Grafana 監控系統"
 readme = "README.md"
 requires-python = ">=3.12"
@@ -16,11 +16,13 @@ authors = [
 dependencies = [
     "psutil",
     "prometheus_client",
+    "requests",
 ]
 
 [project.optional-dependencies]
 test = [
     "pytest",
+    "pyyaml",
 ]
 
 [tool.setuptools.packages.find]

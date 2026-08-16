@@ -1,19 +1,45 @@
 """台股伺服器監控 - 主程式。
 
-在 Docker 容器中持續運行，定期檢查各 Tw_stock 服務的健康狀態，
-並以 Prometheus 格式暴露指標供 Prometheus 抓取。
+在 Docker 容器中持續運行，並以 Prometheus 格式暴露指標供 Prometheus 抓取。
+共有三組 collector：
+
+1. **服務健康檢查**：對各 Tw_stock 微服務做 TCP 探測（`collect_service_health`）。
+2. **容器狀態**：查 Docker Engine API 判斷 CI 基礎設施容器是否存活
+   （`src.docker_monitor`），涵蓋不對外開 port、TCP 探測不到的容器。
+3. **GitLab CI 基礎設施**：查 GitLab API 取得 runner 註冊狀態、pipeline
+   失敗原因與 tag 部署落差（`src.gitlab_monitor`）。
+
+第 2、3 組是 2026-07/08「gitlab-runner Exited(0) 四週、零告警」事故後補上的
+監控缺口。GitLab API 成本較高，故以獨立且較長的間隔收集。
 """
 
-import logging
 import os
 import signal
 import socket
-import sys
 import time
 
-from prometheus_client import CollectorRegistry, Gauge, start_http_server
+from prometheus_client import Gauge, start_http_server
 
+from src.docker_monitor import (
+    DEFAULT_SOCKET_PATH,
+    DockerClient,
+    collect_container_health,
+    get_monitored_containers,
+)
+from src.gitlab_monitor import (
+    DEFAULT_GITLAB_URL,
+    DEFAULT_GROUP_ID,
+    DEFAULT_INTERVAL as DEFAULT_GITLAB_INTERVAL,
+    DEFAULT_JOB_WINDOW_HOURS,
+    DEFAULT_TIMEOUT as DEFAULT_GITLAB_TIMEOUT,
+    GitLabClient,
+    collect_gitlab_ci,
+    gitlab_api_up,
+    gitlab_token_configured,
+    resolve_token,
+)
 from src.logger import setup_logger
+from src.registry import registry
 
 # 預設設定
 DEFAULT_PORT = 9102
@@ -35,9 +61,6 @@ MONITORED_SERVICES = [
     {"name": "hot", "host": "tw_stock_hot", "port": 5050},
     {"name": "specialinfo", "host": "tw-stock-specialinfo", "port": 5055},
 ]
-
-# 建立獨立的 registry
-registry = CollectorRegistry()
 
 # 服務健康狀態指標（1=正常, 0=異常）
 service_up = Gauge(
@@ -68,6 +91,38 @@ def _signal_handler(signum, frame):
     """
     global _running
     _running = False
+
+
+def _env_int(name, default):
+    """讀取整數型環境變數，格式錯誤時退回預設值。
+
+    Args:
+        name: 環境變數名稱。
+        default: 預設值。
+
+    Returns:
+        int: 環境變數值或預設值。
+    """
+    try:
+        return int(os.environ.get(name, default))
+    except (TypeError, ValueError):
+        return default
+
+
+def _interruptible_sleep(seconds):
+    """可被終止訊號提早中斷的睡眠。
+
+    以 1 秒為單位分段睡眠，讓 SIGTERM 不必等滿一個檢查間隔才生效。
+
+    Args:
+        seconds: 預計睡眠秒數。
+    """
+    deadline = time.monotonic() + seconds
+    while _running:
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            return
+        time.sleep(min(1.0, remaining))
 
 
 def check_service(host, port, timeout=DEFAULT_TIMEOUT):
@@ -133,11 +188,40 @@ def collect_service_health(logger, timeout=DEFAULT_TIMEOUT):
             logger.warning("服務 %s (%s:%d) 無法連線", name, host, port)
 
 
+def build_gitlab_client(logger):
+    """依環境變數建立 GitLab API 客戶端。
+
+    未提供權杖時回傳 None（GitLab CI 監控停用），並讓
+    `tw_stock_gitlab_token_configured` 維持 0——此狀態本身有對應告警，
+    不會變成另一個「靜默失效」。
+
+    Args:
+        logger: Logger 實例。
+
+    Returns:
+        GitLabClient: 客戶端實例；未設定權杖時為 None。
+    """
+    token = resolve_token()
+    gitlab_token_configured.set(1 if token else 0)
+    if not token:
+        gitlab_api_up.set(0)
+        logger.warning(
+            "未設定 GITLAB_TOKEN / GITLAB_TOKEN_FILE，GitLab CI 監控停用"
+        )
+        return None
+
+    url = os.environ.get("GITLAB_URL", DEFAULT_GITLAB_URL)
+    timeout = _env_int("GITLAB_API_TIMEOUT", DEFAULT_GITLAB_TIMEOUT)
+    logger.info("GitLab CI 監控已啟用，站台 %s", url)
+    return GitLabClient(base_url=url, token=token, timeout=timeout)
+
+
 def main():
     """主程式進入點。
 
-    啟動 Prometheus metrics HTTP 伺服器，並以固定間隔持續檢查
-    各 Tw_stock 服務的健康狀態。收到 SIGTERM/SIGINT 時優雅關閉。
+    啟動 Prometheus metrics HTTP 伺服器，並以固定間隔持續收集服務健康
+    狀態、CI 基礎設施容器狀態與 GitLab CI 指標。收到 SIGTERM/SIGINT
+    時優雅關閉。
     """
     global _running
 
@@ -149,9 +233,25 @@ def main():
     signal.signal(signal.SIGINT, _signal_handler)
 
     # 讀取環境變數設定
-    port = int(os.environ.get("MONITOR_METRICS_PORT", DEFAULT_PORT))
-    interval = int(os.environ.get("MONITOR_CHECK_INTERVAL", DEFAULT_CHECK_INTERVAL))
-    timeout = int(os.environ.get("MONITOR_CHECK_TIMEOUT", DEFAULT_TIMEOUT))
+    port = _env_int("MONITOR_METRICS_PORT", DEFAULT_PORT)
+    interval = _env_int("MONITOR_CHECK_INTERVAL", DEFAULT_CHECK_INTERVAL)
+    timeout = _env_int("MONITOR_CHECK_TIMEOUT", DEFAULT_TIMEOUT)
+    gitlab_interval = _env_int("GITLAB_CHECK_INTERVAL", DEFAULT_GITLAB_INTERVAL)
+    gitlab_group = os.environ.get("GITLAB_GROUP_ID", DEFAULT_GROUP_ID)
+    gitlab_window = _env_int(
+        "GITLAB_JOB_WINDOW_HOURS", DEFAULT_JOB_WINDOW_HOURS
+    )
+
+    # 容器狀態監控（CI 基礎設施）
+    containers = get_monitored_containers()
+    docker_client = DockerClient(
+        socket_path=os.environ.get("MONITOR_DOCKER_SOCKET",
+                                   DEFAULT_SOCKET_PATH),
+        timeout=timeout,
+    )
+
+    # GitLab CI 監控
+    gitlab_client = build_gitlab_client(logger)
 
     # 啟動 Prometheus metrics HTTP 伺服器
     start_http_server(port, registry=registry)
@@ -159,14 +259,35 @@ def main():
     logger.info("健康檢查間隔 %d 秒，逾時 %d 秒", interval, timeout)
     logger.info("監控 %d 個服務: %s", len(MONITORED_SERVICES),
                 ", ".join(s["name"] for s in MONITORED_SERVICES))
+    logger.info("監控 %d 個容器: %s", len(containers),
+                ", ".join(containers) if containers else "（停用）")
+    logger.info("GitLab CI 指標收集間隔 %d 秒（群組 %s）",
+                gitlab_interval, gitlab_group)
 
-    # 主循環：定期收集服務健康狀態
+    # 主循環：定期收集各項指標
+    next_gitlab_check = 0.0
     while _running:
         try:
             collect_service_health(logger, timeout)
         except Exception:
             logger.exception("收集服務健康狀態時發生未預期錯誤")
-        time.sleep(interval)
+
+        try:
+            collect_container_health(logger, docker_client, containers)
+        except Exception:
+            logger.exception("收集容器狀態時發生未預期錯誤")
+
+        if gitlab_client is not None and time.monotonic() >= next_gitlab_check:
+            try:
+                collect_gitlab_ci(
+                    logger, gitlab_client, gitlab_group,
+                    window_hours=gitlab_window,
+                )
+            except Exception:
+                logger.exception("收集 GitLab CI 指標時發生未預期錯誤")
+            next_gitlab_check = time.monotonic() + gitlab_interval
+
+        _interruptible_sleep(interval)
 
     logger.info("台股伺服器監控結束")
 
