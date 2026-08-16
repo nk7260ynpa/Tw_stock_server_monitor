@@ -11,6 +11,9 @@
 
 第 2、3 組是 2026-07/08「gitlab-runner Exited(0) 四週、零告警」事故後補上的
 監控缺口。GitLab API 成本較高，故以獨立且較長的間隔收集。
+
+另外還跑一個 **Alertmanager webhook 接收器**（`src.alert_receiver`），讓告警
+真的有地方送達，並以 Watchdog 心跳偵測推播鏈路本身是否斷掉。
 """
 
 import os
@@ -21,6 +24,7 @@ import time
 
 from prometheus_client import Gauge, start_http_server
 
+from src.alert_receiver import start_alert_receiver
 from src.docker_monitor import (
     DEFAULT_SOCKET_PATH,
     DockerClient,
@@ -290,6 +294,9 @@ def main():
     # 啟動 Prometheus metrics HTTP 伺服器
     start_http_server(port, registry=registry)
     logger.info("Metrics HTTP 伺服器已啟動，監聽端口 %d", port)
+
+    # 啟動 Alertmanager webhook 接收器（本地推播管道 + 心跳死人開關）
+    start_alert_receiver(logger)
     logger.info("健康檢查間隔 %d 秒，逾時 %d 秒", interval, timeout)
     logger.info("監控 %d 個服務: %s", len(MONITORED_SERVICES),
                 ", ".join(s["name"] for s in MONITORED_SERVICES))

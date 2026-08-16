@@ -1,0 +1,135 @@
+# Alertmanager 設定：告警分組、抑制與推播管道
+#
+# 設計目標（依 2026-07/08「runner Exited(0) 四週零告警」事故的教訓）：
+#   1. 告警要真的送得出去，而不是只存在 Prometheus 的 ALERTS 序列裡。
+#   2. **一次事故只發一則通知**。數十條規則同時響會被當成噪音關掉，
+#      那等於回到沒有告警的原點，所以 grouping 與 inhibition 是必要設計、
+#      不是裝飾。
+#   3. 推播管道自己斷掉時要看得出來（Watchdog 心跳，見最下方 receiver）。
+#
+# 預設管道刻意選「不依賴任何外部服務」的本地 webhook：Service Monitor 內建
+# 的接收器會把通知落地成 JSON Lines 並轉成指標。Email／Slack 需要使用者的
+# 憑證，範本列在檔案最下方，取得憑證後再啟用。
+
+global:
+  # 超過此時間沒再收到同一則告警，就視為已解除
+  resolve_timeout: 5m
+
+route:
+  receiver: local-webhook
+
+  # 依 component 分組：同一次基礎設施事故（ci / monitoring）會被併成一則
+  # 通知，而不是每條規則各發一封。這是壓低噪音最有效的一招。
+  group_by: ["component"]
+
+  # 首次觸發後等 30 秒，讓同一波連鎖告警有機會併進同一則通知
+  group_wait: 30s
+  # 同一組內有新告警加入時，最快 5 分鐘再發一次
+  group_interval: 5m
+  # 問題未解除時的重複提醒間隔
+  repeat_interval: 4h
+
+  routes:
+    # 心跳：永遠觸發，用來證明「Prometheus → Alertmanager → 接收器」是通的。
+    # repeat_interval 必須遠小於 AlertDeliveryStalled 的 15 分鐘門檻，
+    # 否則正常狀況下也會被判定為心跳中斷。
+    - matchers:
+        - alertname = "Watchdog"
+      receiver: watchdog
+      group_wait: 0s
+      group_interval: 1m
+      repeat_interval: 2m
+
+    # critical 走獨立路由：等待時間更短、重複提醒更密集
+    - matchers:
+        - severity = "critical"
+      receiver: local-webhook-critical
+      group_wait: 10s
+      group_interval: 5m
+      repeat_interval: 1h
+
+# ── 抑制規則（因果關係，由上游抑制下游）─────────────────────────────
+#
+# 這裡只寫「A 發生必然導致 B」的因果抑制，不做「同 component 的 critical
+# 一律蓋掉 warning」這種粗糙抑制——後者會把不相干的問題一起消音，
+# 反而製造新的盲區。
+inhibit_rules:
+  # 1. runner 容器掛掉 → 註冊狀態、job 卡住、tag 未部署都是它的必然後果。
+  #    這正是本次事故的形狀：一次事故不該炸出五封通知。
+  - source_matchers:
+      - alertname = "GitLabRunnerContainerDown"
+    target_matchers:
+      - alertname =~ "GitLabNoOnlineRunner|GitLabRunnerOffline|GitLabRunnerNoContact|GitLabRunnerPaused|GitLabJobsStuckNoMatchingRunner|GitLabPipelineFailed|GitLabTagNotDeployed"
+
+  # 2. Docker API 不通 → 所有容器狀態指標都不可信，容器類告警一律不算數。
+  - source_matchers:
+      - alertname = "DockerApiUnreachable"
+    target_matchers:
+      - alertname =~ "GitLabRunnerContainerDown|CIContainerDown|RunnerContainerMetricMissing"
+
+  # 3. GitLab API 不通或權杖沒設 → GitLab 來源的告警全部失真。
+  - source_matchers:
+      - alertname =~ "GitLabApiUnreachable|GitLabTokenMissing|GitLabCollectorStalled"
+    target_matchers:
+      - alertname =~ "GitLabNoOnlineRunner|GitLabRunnerOffline|GitLabRunnerNoContact|GitLabRunnerPaused|GitLabJobsStuckNoMatchingRunner|GitLabPipelineFailed|GitLabTagNotDeployed"
+
+  # 4. Service Monitor 整個不見或停擺 → 它產出的所有指標都是舊值，
+  #    下游告警不可信。先修監控本身。
+  #    AlertReceiverMetricMissing 也在此列：接收器跑在 Service Monitor 行程內，
+  #    行程不見時「指標缺席」與「監控缺席」是同一件事，不必發第二則。
+  - source_matchers:
+      - alertname =~ "ServiceMonitorMetricsMissing|ServiceMonitorCheckStalled"
+    target_matchers:
+      - alertname =~ "TwStockServiceDown|CIContainerDown|GitLabRunnerContainerDown|RunnerContainerMetricMissing|DockerApiUnreachable|AlertReceiverMetricMissing"
+
+  # 5. Alertmanager 自己掛了 → 通知本來就送不出去，
+  #    「推播鏈路停擺」是同一件事，不必再發第二則。
+  - source_matchers:
+      - alertname = "AlertmanagerDown"
+    target_matchers:
+      - alertname =~ "AlertDeliveryStalled|AlertNotificationFailing"
+
+receivers:
+  # 預設管道：Service Monitor 內建的 webhook 接收器（src/alert_receiver.py）。
+  # 不需要任何憑證或外部服務，容器起來就能用。
+  - name: local-webhook
+    webhook_configs:
+      - url: http://tw-stock-server-monitor:9103/alerts
+        send_resolved: true
+
+  - name: local-webhook-critical
+    webhook_configs:
+      - url: http://tw-stock-server-monitor:9103/alerts
+        send_resolved: true
+
+  # 心跳專用：不需要 resolved 通知（它永遠不會 resolved）
+  - name: watchdog
+    webhook_configs:
+      - url: http://tw-stock-server-monitor:9103/alerts
+        send_resolved: false
+
+  # ── 以下為需要使用者憑證的外部管道範本，預設停用 ──────────────
+  #
+  # 取得憑證後，把對應區塊解除註解並加到上方 route 的 routes 中，
+  # 搭配 `continue: true` 與本地管道併送，外部服務掛掉時仍留有本地紀錄。
+  #
+  # **密碼一律走 `*_file`，不可寫成 inline 值**：本檔進版控，而
+  # Alertmanager **不會展開環境變數**（放 docker/.env 沒有用），
+  # 唯一安全的做法是把密碼放進 docker/alertmanager/secrets/ 下的檔案
+  # （該目錄已被 .gitignore 排除），再以檔案路徑引用。
+  # 詳見 README「設定外部推播管道」。
+  #
+  # - name: email
+  #   email_configs:
+  #     - to: "<收件人>"
+  #       from: "<寄件人>"
+  #       smarthost: "<SMTP 主機>:587"
+  #       auth_username: "<帳號>"
+  #       auth_password_file: /etc/alertmanager/secrets/smtp_password
+  #       send_resolved: true
+  #
+  # - name: slack
+  #   slack_configs:
+  #     - api_url_file: /etc/alertmanager/secrets/slack_webhook_url
+  #       channel: "#alerts"
+  #       send_resolved: true

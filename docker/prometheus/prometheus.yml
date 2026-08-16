@@ -3,11 +3,17 @@ global:
   evaluation_interval: 15s
 
 # 告警規則檔（由 docker-compose 以唯讀方式掛載 ./prometheus/rules）
-# 觸發中的告警會以 ALERTS 序列存在 Prometheus 內，並由 Grafana 的
-# 「CI/CD 與基礎設施監控」儀表板呈現；尚未接 Alertmanager，
-# 要推播到外部管道時再於此加上 alerting.alertmanagers 設定。
+# 觸發中的告警會以 ALERTS 序列存在 Prometheus 內，同時推送給 Alertmanager。
 rule_files:
   - "/etc/prometheus/rules/*.yml"
+
+# 告警推播：送往同一個 compose 堆疊內的 Alertmanager。
+# 這段若遺失，規則照常評估但一則通知都不會送出（無聲失效），
+# 故另有 PrometheusNotConnectedToAlertmanager 告警看守。
+alerting:
+  alertmanagers:
+    - static_configs:
+        - targets: ["alertmanager:9093"]
 
 scrape_configs:
   - job_name: "prometheus"
@@ -28,3 +34,8 @@ scrape_configs:
   - job_name: "tw-stock-monitor"
     static_configs:
       - targets: ["tw-stock-server-monitor:9102"]
+
+  # Alertmanager 自身指標（通知送不出去時由此看見）
+  - job_name: "alertmanager"
+    static_configs:
+      - targets: ["alertmanager:9093"]

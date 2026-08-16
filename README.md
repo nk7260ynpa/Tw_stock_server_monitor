@@ -4,7 +4,8 @@
 即時監控主機 CPU、記憶體、磁碟、網路等資源使用量，
 持續檢查各 Tw_stock 微服務的健康狀態，
 並監控 **CI/CD 基礎設施**（GitLab Runner 容器、runner 註冊狀態、pipeline
-與 tag 部署結果）是否無聲無息地停擺。
+與 tag 部署結果）是否無聲無息地停擺，
+再經 **Alertmanager** 分組、抑制後推播出去（一次事故只發一則通知）。
 
 支援 **macOS** 與 **Linux** 兩種部署環境。
 
@@ -16,10 +17,14 @@ Tw_stock_server_monitor/
 │   ├── build.sh                          # 建立 Docker image 的執行腳本
 │   ├── Dockerfile                        # Docker image 定義
 │   ├── docker-compose.yaml               # Docker Compose 設定（含監控服務）
+│   ├── alertmanager/
+│   │   ├── alertmanager.yml              # 告警路由、分組與抑制規則
+│   │   └── secrets/                      # 外部管道憑證（不進版控）
 │   ├── prometheus/
 │   │   ├── prometheus.yml                # Prometheus 設定檔
 │   │   └── rules/
 │   │       ├── ci_alerts.yml             # CI/CD 基礎設施告警規則
+│   │       ├── notification_alerts.yml   # 推播鏈路自身的告警規則
 │   │       └── service_alerts.yml        # 微服務與監控自身告警規則
 │   └── grafana/
 │       └── provisioning/
@@ -30,8 +35,16 @@ Tw_stock_server_monitor/
 │               ├── node-exporter.json    # 主機資源監控儀表板
 │               └── ci-cd.json            # CI/CD 基礎設施監控儀表板
 ├── logs/                                 # 日誌檔案目錄
+│   └── alerts/                           # 告警通知落地（JSON Lines）
+├── scripts/
+│   ├── alert_drill.sh                    # 告警推播鏈路端對端演練
+│   └── drill/
+│       ├── assert_drill.py               # 演練驗收（抑制是否真的生效）
+│       ├── run_receiver.py               # 演練用的接收器行程
+│       └── serve_metrics.py              # 演練用的事故指標端點
 ├── src/
 │   ├── __init__.py
+│   ├── alert_receiver.py                 # Alertmanager webhook 接收器
 │   ├── docker_monitor.py                 # Docker 容器存活監控（走 docker.sock）
 │   ├── gitlab_monitor.py                 # GitLab CI 基礎設施監控（REST API）
 │   ├── logger.py                         # 日誌設定模組
@@ -43,8 +56,11 @@ Tw_stock_server_monitor/
 │   ├── __init__.py
 │   ├── prometheus/
 │   │   ├── ci_alerts_test.yml            # CI 告警規則的 promtool 測試
+│   │   ├── notification_alerts_test.yml  # 推播鏈路告警的 promtool 測試
 │   │   └── service_alerts_test.yml       # 服務告警規則的 promtool 測試
+│   ├── test_alert_receiver.py            # webhook 接收器單元測試
 │   ├── test_alert_rules.py               # 告警規則結構與覆蓋率測試
+│   ├── test_alertmanager_config.py       # 路由與抑制規則的結構測試
 │   ├── test_docker_monitor.py            # 容器監控單元測試
 │   ├── test_gitlab_monitor.py            # GitLab CI 監控單元測試
 │   ├── test_macos_exporter.py            # macOS Exporter 單元測試
@@ -170,7 +186,8 @@ bash run.sh
 
 - **主機資源監控**：CPU／記憶體／磁碟／網路與程序排行榜。
 - **CI/CD 基礎設施監控**：觸發中告警、GitLab Runner 容器狀態、online runner
-  數、各專案 pipeline 狀態、因無可用 runner 卡住的 job、尚未成功部署的 tag。
+  數、各專案 pipeline 狀態、因無可用 runner 卡住的 job、尚未成功部署的 tag，
+  以及**告警推播鏈路**（Alertmanager／接收器狀態、心跳新鮮度、24h 通知數）。
 
 ### 3. 切換資料來源
 
@@ -188,6 +205,8 @@ bash run.sh
 | Node Exporter | 9100 | Docker/Linux 主機指標收集 |
 | macOS Exporter | 9101 | macOS 主機指標收集 |
 | Service Monitor | 9102 | Tw_stock 服務健康檢查指標 |
+| Alertmanager | 9093 | 告警分組、抑制與推播 |
+| 告警接收器 | 9103 | 本地推播管道（Alertmanager webhook） |
 
 ## 監控指標
 
@@ -278,9 +297,9 @@ TCP 探測不到**的 CI 容器。監控對象由 `MONITOR_CONTAINERS` 指定，
 ### 告警規則
 
 規則檔位於 `docker/prometheus/rules/`，由 `prometheus.yml` 的
-`rule_files: /etc/prometheus/rules/*.yml` 載入。目前尚未接 Alertmanager，
-告警會以 `ALERTS` 序列呈現在 Prometheus 與 Grafana 的「CI/CD 基礎設施監控」
-儀表板上。
+`rule_files: /etc/prometheus/rules/*.yml` 載入。觸發的告警會送往
+**Alertmanager**（分組、抑制後推播，見「告警推播管道」），同時以 `ALERTS`
+序列呈現在 Prometheus 與 Grafana 的「CI/CD 基礎設施監控」儀表板上。
 
 | 告警 | 嚴重度 | 觸發條件（`for`） |
 |------|--------|------------------|
@@ -302,10 +321,28 @@ TCP 探測不到**的 CI 容器。監控對象由 `MONITOR_CONTAINERS` 指定，
 | `PrometheusTargetDown` | warning | Prometheus 抓取目標失效（10m） |
 | `ServiceMonitorMetricsMissing` | critical | 完全找不到 Service Monitor 指標（10m） |
 | `ServiceMonitorCheckStalled` | critical | 健康檢查主循環逾 5 分鐘沒完成一輪（5m） |
+| `Watchdog` | info | 永遠觸發的心跳（0m），用途見下方死人開關 |
+| `AlertDeliveryStalled` | critical | 逾 15 分鐘沒收到 Watchdog 心跳（5m） |
+| `AlertReceiverDown` | critical | 本地告警接收器未在服務（5m） |
+| `AlertReceiverMetricMissing` | warning | 查不到接收器狀態指標（15m），例如舊版本續跑 |
+| `AlertmanagerDown` | critical | Alertmanager 抓不到或已停擺（5m） |
+| `AlertNotificationFailing` | critical | Alertmanager 推播持續失敗（10m） |
+| `PrometheusNotConnectedToAlertmanager` | critical | Prometheus 找不到任何 Alertmanager（10m） |
 
 > `GitLabJobsStuckNoMatchingRunner`（基礎設施）與 `GitLabPipelineFailed`
 > （程式碼）刻意分成兩條規則且嚴重度不同：前者重跑 pipeline 沒有用，必須先修
 > runner；兩者同時出現時應優先處理前者。
+>
+> **排隊 ≠ 沒有 runner**：14 個專案共用同一個 runner，job 執行槽數由 runner
+> `config.toml` 的**全域 `concurrent`**（目前為 `1`）決定；`request_concurrency`
+> 並未出現在該設定檔中（即預設值 1），且它管的是「同時向 GitLab 取 job 的請求
+> 數」，不是併發執行數，兩者不可混用。**調高 `concurrent` 並非無腦的好事**：本
+> 系列 repo 的 `deploy` job 是 `build → rm -f → run`，同一個 repo 若有兩條
+> pipeline 並行，會在 `rm -f` 與 `run` 之間互相踩踏；`concurrent = 1` 目前正是
+> 用「全域序列化」換來這個安全性。要提高吞吐的正解是**先在各 repo 的 `deploy`
+> job 加 `resource_group: deploy`**（跨 repo 可並行、同 repo 強制序列），再調高
+> `concurrent`。順序反了就是拿部署正確性換速度。
+> （runner 設定檔不屬於本 repo，變更需由該 repo 的負責人執行。）
 >
 > `ServiceMonitorMetricsMissing` 抓「監控整個不見了」，
 > `ServiceMonitorCheckStalled` 抓「監控還在但已經不動了」——Gauge 不會過期，
@@ -319,6 +356,200 @@ TCP 探測不到**的 CI 容器。監控對象由 `MONITOR_CONTAINERS` 指定，
 > 這些 Gauge 預設值是 0，且 API 失敗時 collector 直接 return、不會寫入，
 > 沒有閘門就會在「權杖沒設」或「權杖過期」時永久假 critical，蓋掉真訊號；
 > 真正的原因由 `GitLabTokenMissing` 與 `GitLabApiUnreachable` 各自負責。
+
+### 告警推播管道
+
+告警規則寫得再好，沒有推播就只是「有人去看才發現」——上次事故正是四週沒人看。
+本專案以 **Alertmanager** 負責推播，並預設一條**不需要任何憑證、不依賴外部
+服務**的本地管道。
+
+```text
+Prometheus ──告警──► Alertmanager ──分組/抑制──► 告警接收器 :9103
+  :9090                 :9093                    （src/alert_receiver.py）
+    ▲                     │                              │
+    └──── 抓取 :9093 ─────┘                    logs/alerts/*.jsonl + 指標
+         （互相監控）
+```
+
+#### 為何選 Alertmanager 而非 Grafana contact point
+
+| 考量 | Alertmanager | Grafana contact point |
+|------|--------------|----------------------|
+| 抑制（inhibition） | 原生 `inhibit_rules`，宣告式 | **不支援**，只能靠 mute timing／notification policy 勉強近似 |
+| 與現有規則的關係 | 既有規則本來就是 Prometheus 原生格式，直接沿用 | 需改寫成 Grafana 管理式告警，等於維護兩套 |
+| 設定是否進版控 | `docker/alertmanager/alertmanager.yml` 進 repo，可被測試 | 設定存在 Grafana 資料庫，改動不留痕跡 |
+| 是否需要憑證 | 不需要 | 對 Grafana 內建 Alertmanager 送告警需要 Grafana 認證 |
+
+**抑制**是這次的關鍵需求（一次事故只發一則通知），Grafana 統一告警沒有等價
+功能，故選 Alertmanager。多一顆容器的代價換來設定進版控、可被單元測試。
+
+#### 分組與抑制
+
+| 機制 | 設定 | 目的 |
+|------|------|------|
+| 分組 | `group_by: [component]`、`group_wait: 30s` | 同一次事故（同 component）併成一則通知 |
+| critical 路由 | `group_wait: 10s`、`repeat_interval: 1h` | 重要告警更快送出、提醒更密集 |
+| 心跳路由 | `repeat_interval: 2m` | 心跳必須遠快於 15 分鐘的停擺門檻 |
+
+抑制規則只寫**因果關係**（A 發生必然導致 B），不做「critical 一律蓋掉
+warning」這種粗糙抑制——後者會把不相干的問題一起消音，等於製造新盲區。
+
+| 來源（先修這個） | 被抑制的下游告警 |
+|-----------------|-----------------|
+| `GitLabRunnerContainerDown` | `GitLabNoOnlineRunner`、`GitLabRunnerOffline`、`GitLabRunnerNoContact`、`GitLabRunnerPaused`、`GitLabJobsStuckNoMatchingRunner`、`GitLabPipelineFailed`、`GitLabTagNotDeployed` |
+| `DockerApiUnreachable` | 所有容器狀態類告警 |
+| `GitLabApiUnreachable` / `GitLabTokenMissing` / `GitLabCollectorStalled` | 所有 GitLab 來源的 CI 告警 |
+| `ServiceMonitorMetricsMissing` / `ServiceMonitorCheckStalled` | 所有由 Service Monitor 指標推導的告警 |
+| `AlertmanagerDown` | `AlertDeliveryStalled`、`AlertNotificationFailing` |
+
+> 抑制最典型的失效是**安靜地不生效**：告警名稱打錯一個字，`amtool check-config`
+> 照樣通過，抑制卻永遠不會發生。`tests/test_alertmanager_config.py` 因此逐一
+> 比對抑制規則裡的名稱是否真的存在於規則檔，並檢查上表第一列的必要抑制集合。
+>
+> **已知取捨**：第一列連 `GitLabPipelineFailed` 一起抑制，因此 runner 停擺
+> 期間真實的「程式碼失敗」也會被一併消音，要等 runner 復原後才會重新送出。
+> 這是刻意的選擇——runner 掛掉時所有 pipeline 都會失敗，不抑制就會被上百則
+> 假陽性淹沒；而 runner 一修好，仍然失敗的 pipeline 會在下一個評估週期再叫。
+
+#### 誰來監控告警系統本身
+
+推播鏈路自己斷掉時，**症狀就是「沒有通知」**，與「一切正常」外觀完全相同。
+因此鏈路上每一段都被另一段盯著：
+
+| 失效點 | 由誰發現 |
+|--------|---------|
+| Prometheus 沒接到 Alertmanager | `PrometheusNotConnectedToAlertmanager` |
+| Alertmanager 掛了 | `AlertmanagerDown`（Prometheus 抓 `up{job="alertmanager"}`） |
+| Alertmanager 送不出去 | `AlertNotificationFailing`（`alertmanager_notifications_failed_total`） |
+| 接收器掛了 | `AlertReceiverDown`（另有 `AlertReceiverMetricMissing` 抓「指標根本不存在」，例如舊版本容器續跑） |
+| 上述以外的任何一段斷掉 | `Watchdog` 心跳停止 → `AlertDeliveryStalled` |
+
+> **注意這張表的自我指涉**：接收器是目前**唯一**的 receiver，所以
+> `AlertReceiverDown` / `AlertReceiverMetricMissing` / `AlertNotificationFailing`
+> 一旦觸發，它們自己也送不出去，只會留在 Prometheus 的 `ALERTS` 序列與
+> Grafana 的「告警推播鏈路」面板上。接上外部管道（下方 runbook）後才有
+> 真正的第二條腿。
+
+`Watchdog` 是 **死人開關（dead man's switch）**：一條 `vector(1)` 永遠觸發的
+告警，每 2 分鐘經由完整鏈路送到接收器一次。接收器把它記成
+`tw_stock_alert_watchdog_last_timestamp_seconds`，超過 15 分鐘沒更新就代表
+鏈路某處斷了。**把「沉默」轉成可觀測的訊號**，與
+`ServiceMonitorCheckStalled` 是同一套思路。
+
+> **殘留限制（誠實揭露）**：這套互看仍在同一台主機、同一個 Docker
+> daemon 內。若整台主機或 Docker 全掛，沒有任何一段能對外發聲。要補這個缺口
+> 必須有**外部**管道（下方 runbook 的 SMTP／Slack，或外部的 healthchecks.io
+> 之類心跳服務）。在那之前，本地管道保證的是「監控自己壞掉時會留下紀錄且
+> 可被查覺」，不是「一定會即時通知到人」。
+
+#### 本地推播管道（預設，免憑證）
+
+Service Monitor 行程內建 webhook 接收器（`src/alert_receiver.py`，port 9103）：
+
+- 通知落地為 `logs/alerts/notifications-YYYYMMDD.jsonl`（JSON Lines，可稽核）。
+- 同步寫入專案日誌：critical 走 `logger.error`、warning 走 `logger.warning`。
+- 轉成 Prometheus 指標，可在 Grafana 上看推播是否正常：
+
+| 指標 | 說明 |
+|------|------|
+| `tw_stock_alert_notifications_total{alertname,severity,status}` | 收到的通知數 |
+| `tw_stock_alert_receiver_up` | 接收器是否服務中 |
+| `tw_stock_alert_last_notification_timestamp_seconds` | 最近一次收到通知的時間 |
+| `tw_stock_alert_watchdog_last_timestamp_seconds` | 最近一次心跳時間 |
+
+> 落地檔按日切檔但**沒有自動清除**，長期會在具名 volume
+> `tw-stock-server-monitor_logs` 內累積（心跳不落地，故量很小：只有真正的
+> 告警才寫入）。需要時自行刪除舊檔即可。
+
+```bash
+# 查看今天送出的告警通知
+docker exec tw-stock-server-monitor \
+  cat /app/logs/alerts/notifications-$(date +%Y%m%d).jsonl
+
+# 手動送一則測試通知（確認接收器活著）
+docker exec tw-stock-server-monitor python - <<'PY'
+import json, urllib.request
+payload = {"status": "firing", "receiver": "manual-test", "alerts": [{
+    "status": "firing",
+    "labels": {"alertname": "ManualTest", "severity": "warning"},
+    "annotations": {"summary": "手動測試通知"}}]}
+req = urllib.request.Request(
+    "http://127.0.0.1:9103/alerts",
+    data=json.dumps(payload).encode(),
+    headers={"Content-Type": "application/json"})
+print(urllib.request.urlopen(req).read().decode())
+PY
+```
+
+#### 設定外部推播管道（需使用者提供憑證）
+
+本地管道證明鏈路是通的，但**通知不會主動找上你**。要真正推播到手機／信箱，
+需接 Email 或 Slack。**憑證屬於使用者，不會也不該由開發流程自行填入或猜測**，
+`docker/alertmanager/alertmanager.yml` 底部只留註解範本。
+
+啟用步驟：
+
+1. 準備下列設定值（依選用管道擇一）：
+
+   | 管道 | 需要的設定 | 取得方式 |
+   |------|-----------|---------|
+   | Email | `smarthost`（SMTP 主機:埠，如 `smtp.gmail.com:587`） | 郵件服務商文件 |
+   | Email | `auth_username`（寄件帳號） | 你的信箱帳號 |
+   | Email | **應用程式專用密碼**（非登入密碼） | Gmail：帳戶 → 安全性 → 兩步驟驗證 → 應用程式密碼 |
+   | Email | `from` / `to`（寄件人／收件人） | 自行決定 |
+   | Slack | **Incoming Webhook URL** | Slack → Apps → Incoming Webhooks → Add to Slack |
+   | Slack | `channel`（頻道名稱） | 自行決定 |
+
+2. 把**密碼類**設定寫成檔案放進 `docker/alertmanager/secrets/`
+   （該目錄內容已被 `.gitignore` 排除，**不會進版控**）：
+
+   ```bash
+   printf '%s' '<應用程式密碼>' > docker/alertmanager/secrets/smtp_password
+   printf '%s' '<Slack Webhook URL>' > docker/alertmanager/secrets/slack_webhook_url
+   chmod 600 docker/alertmanager/secrets/*
+
+   # Linux 部署另需這一步：容器內以 nobody(65534) 執行，600 會讓它讀不到
+   # 憑證而啟動失敗。macOS 的 Docker Desktop 會自動 remap 擁有者，不需要。
+   sudo chown 65534 docker/alertmanager/secrets/*
+   ```
+
+   > **為何不是 `docker/.env`**：Alertmanager **不會展開設定檔中的環境變數**，
+   > `.env` 只對 Docker Compose 本身有效。若把密碼寫成 inline 值，就等於把它
+   > 提交進版控——因此設定檔一律用 `auth_password_file` / `api_url_file`
+   > 引用容器內的 `/etc/alertmanager/secrets/`（compose 已掛載該目錄）。
+   > `tests/test_alertmanager_config.py` 會擋下 inline 憑證。
+
+3. 解除 `alertmanager.yml` 底部對應區塊的註解（非密碼欄位如 `to` / `from` /
+   `smarthost` 可直接填），並在 route 加上該 receiver；
+   建議搭配 `continue: true` 與本地管道併送，外部服務掛掉時仍留有本地紀錄。
+4. 套用設定並實測：
+
+   ```bash
+   docker compose -f docker/docker-compose.yaml up -d alertmanager
+   docker exec alertmanager amtool --alertmanager.url=http://localhost:9093 \
+     alert add TestAlert severity=critical component=ci \
+     summary="外部管道測試"
+   ```
+
+#### 端對端演練（實測告警真的會響）
+
+**只寫設定不算數**，必須實測。`scripts/alert_drill.sh` 會在**隔離的 Docker
+網路**中重現「runner 容器停掉」事故，跑完整條
+Prometheus → Alertmanager → 接收器 鏈路：
+
+```bash
+bash scripts/alert_drill.sh          # 跑完自動清理
+bash scripts/alert_drill.sh --keep   # 保留容器供人工檢視
+```
+
+演練會斷言：6 條下游告警**確實觸發**（證明指標到位）、在 Alertmanager 中
+狀態為 `suppressed`（證明抑制生效）、最終**只有 1 則通知**送達本地管道，
+且 Watchdog 心跳有送到。
+
+> **演練刻意不去停真正的 `gitlab-runner`**。其他 repo 隨時可能打 tag 部署，
+> 停 runner 會讓它們的 pipeline 卡在 pending。事故情境改以假指標端點重現，
+> 用的卻是**未經修改的正式 Alertmanager 設定**與正式告警規則（僅把 `for:`
+> 縮短），因此演練通過等於正式設定通過。
 
 ### 設定 GitLab API 權杖
 
@@ -355,7 +586,9 @@ commit**，一律由環境變數提供，程式也不會把權杖寫進日誌。
 
 | 變數 | 預設值 | 說明 |
 |------|--------|------|
-| `MONITOR_CONTAINERS` | `gitlab-runner,gitlab` | 監控存活的容器名稱（逗號分隔，空字串停用） |
+| `MONITOR_CONTAINERS` | `gitlab-runner,gitlab` | 監控存活的容器名稱（逗號分隔，空字串停用）。部署時另加 `alertmanager` |
+| `ALERT_RECEIVER_PORT` | `9103` | 本地告警接收器的監聽埠 |
+| `ALERT_LOG_DIR` | `logs/alerts` | 告警通知的落地目錄 |
 | `GITLAB_URL` | `http://host.docker.internal:8080` | 自架 GitLab 網址。**容器內不可用 `127.0.0.1`**，那是容器自己 |
 | `GITLAB_TOKEN` | 空 | `read_api` 權杖 |
 | `GITLAB_TOKEN_FILE` | 空 | 權杖檔路徑（`GITLAB_TOKEN` 未設時才讀） |
@@ -415,23 +648,32 @@ bash run_macos_exporter.sh stop
 docker compose -f docker/docker-compose.yaml down -v
 ```
 
-### 套用新的告警規則
+### 套用新的告警規則或推播設定
 
-規則檔以 bind mount 掛進 Prometheus（`./prometheus/rules:/etc/prometheus/rules:ro`）。
-**CI 的 `deploy` job 只重啟 Service Monitor，不會動 Prometheus**，因此新增或
-修改規則後需手動讓 Prometheus 重新載入。**首次導入告警規則時這一步是必要的**：
-在執行之前 `/api/v1/rules` 會回 `{"groups":[]}`，等於一條告警都沒有——正是本套
-規則要消滅的無聲狀態，務必實際確認載入結果：
+規則檔與 Alertmanager 設定都以 bind mount 掛進容器
+（`./prometheus/rules:/etc/prometheus/rules:ro`、
+`./alertmanager/alertmanager.yml:/etc/alertmanager/alertmanager.yml:ro`）。
+**CI 的 `deploy` job 只重啟 Service Monitor，不會動 Prometheus 或
+Alertmanager**，因此改完設定後需手動讓它們重新載入。**首次導入時這一步是必要
+的**：在執行之前 `/api/v1/rules` 會回 `{"groups":[]}`，等於一條告警都沒有——
+正是本套規則要消滅的無聲狀態，務必實際確認載入結果：
 
 ```bash
-# 首次新增掛載點時必須重建容器
-docker compose -f docker/docker-compose.yaml up -d prometheus
+# 首次新增掛載點／新增 alertmanager 服務時必須重建容器
+docker compose -f docker/docker-compose.yaml up -d prometheus alertmanager
 
-# 僅修改規則內容時，重啟即可
-docker restart prometheus
+# 僅修改規則或設定內容時，重啟即可
+docker restart prometheus alertmanager
 
 # 確認規則已載入
 docker exec prometheus wget -qO- http://localhost:9090/api/v1/rules | head
+
+# 確認 Prometheus 真的連上 Alertmanager（activeAlertmanagers 不可為空）
+docker exec prometheus wget -qO- http://localhost:9090/api/v1/alertmanagers
+
+# 確認 Alertmanager 載入的是新設定
+docker exec alertmanager amtool --alertmanager.url=http://localhost:9093 \
+  config show
 ```
 
 ## 執行測試
@@ -458,10 +700,32 @@ docker run --rm -v "$(pwd)":/work -w /work --entrypoint promtool \
 
 docker run --rm -v "$(pwd)":/work -w /work --entrypoint promtool \
   prom/prometheus:latest test rules tests/prometheus/service_alerts_test.yml
+
+docker run --rm -v "$(pwd)":/work -w /work --entrypoint promtool \
+  prom/prometheus:latest test rules \
+  tests/prometheus/notification_alerts_test.yml
 ```
 
 `tests/test_alert_rules.py` 另會檢查**每條告警都有對應的 promtool 測試**，
 新增規則卻忘記補測試時會直接失敗。
+
+### 告警推播設定測試
+
+```bash
+# 語法檢查
+docker run --rm -v "$(pwd)":/work -w /work --entrypoint amtool \
+  prom/alertmanager:latest check-config docker/alertmanager/alertmanager.yml
+
+# 路由檢查（確認告警走到預期的 receiver）
+docker run --rm -v "$(pwd)":/work -w /work --entrypoint amtool \
+  prom/alertmanager:latest config routes test \
+  --config.file=docker/alertmanager/alertmanager.yml \
+  alertname=GitLabRunnerContainerDown severity=critical component=ci
+```
+
+`tests/test_alertmanager_config.py` 守住 `amtool` 驗不出來的語意問題（抑制規則
+名稱打錯、心跳間隔大於停擺門檻、硬編憑證等）；
+`scripts/alert_drill.sh` 則做端對端實測，見「告警推播管道 → 端對端演練」。
 
 ## CI/CD（自動部署 + GitHub 鏡像）
 
@@ -482,11 +746,23 @@ docker build  →  docker rm -f tw-stock-server-monitor  →  docker run（新 i
 ```
 
 > **重要特例**：本 repo 為多容器監控堆疊，但**只有 Service Monitor 這顆 image
-> 由本 repo build**；Prometheus / Grafana / Node Exporter 皆為上游官方映像，且
-> compose 內以相對路徑 bind 掛載設定檔。因此 `deploy` **只 build + 重啟
-> `tw-stock-server-monitor` 一顆容器**，**絕不**`docker rm` 或重啟
-> prometheus / grafana / node-exporter，也**不**執行 `docker compose`、不動
-> launchd / macOS 原生 exporter。
+> 由本 repo build**；Prometheus / Alertmanager / Grafana / Node Exporter 皆為
+> 上游官方映像，且 compose 內以相對路徑 bind 掛載設定檔。因此 `deploy`
+> **只 build + 重啟 `tw-stock-server-monitor` 一顆容器**，**絕不**`docker rm`
+> 或重啟 prometheus / alertmanager / grafana / node-exporter，也**不**執行
+> `docker compose`、不動 launchd / macOS 原生 exporter。
+>
+> 換句話說，**改 `alertmanager.yml` 或告警規則不會被 CI 自動套用**，需依
+> 「套用新的告警規則或推播設定」手動重啟那兩顆容器。
+>
+> **順序很重要：先手動起 Prometheus / Alertmanager，再打 tag。** Service
+> Monitor 的 `MONITOR_CONTAINERS` 已納入 `alertmanager`，若先打 tag、
+> Alertmanager 卻還沒起來，`CIContainerDown` 與 `AlertmanagerDown` 會立刻
+> 觸發，而此時偏偏沒有任何管道送得出去：
+>
+> ```bash
+> docker compose -f docker/docker-compose.yaml up -d prometheus alertmanager
+> ```
 
 部署細節：
 
@@ -496,13 +772,15 @@ docker build  →  docker rm -f tw-stock-server-monitor  →  docker run（新 i
 - **網路**：`--network db_network`，讓 Service Monitor 對其他 Tw_stock 服務做
   TCP 探測，並讓 Prometheus 以容器名 `tw-stock-server-monitor:9102` 在
   `db_network` 上抓取指標。
-- **port**：`--expose 9102`（僅容器內部暴露、不對外 publish，與 compose 一致）。
+- **port**：`--expose 9102`（指標）與 `--expose 9103`（Alertmanager webhook
+  接收器），僅容器內部暴露、不對外 publish，與 compose 一致。
 - **掛載**：`/var/run/docker.sock:ro`，供容器存活監控查詢 `gitlab-runner`
   等不 publish port 的 CI 容器。
 - **環境變數**：`MONITOR_METRICS_PORT=9102`、`MONITOR_CHECK_INTERVAL=30`、
-  `MONITOR_CHECK_TIMEOUT=5`、`MONITOR_CONTAINERS`、`GITLAB_URL`、
-  `GITLAB_GROUP_ID`、`GITLAB_CHECK_INTERVAL`，以及由 **masked CI/CD 變數**
-  `MONITOR_GITLAB_TOKEN` 傳入的 `GITLAB_TOKEN`（權杖不寫在 `.gitlab-ci.yml`）。
+  `MONITOR_CHECK_TIMEOUT=5`、`MONITOR_CONTAINERS`、`ALERT_RECEIVER_PORT=9103`、
+  `ALERT_LOG_DIR`、`GITLAB_URL`、`GITLAB_GROUP_ID`、`GITLAB_CHECK_INTERVAL`，
+  以及由 **masked CI/CD 變數** `MONITOR_GITLAB_TOKEN` 傳入的 `GITLAB_TOKEN`
+  （權杖不寫在 `.gitlab-ci.yml`）。
 - **logs**：改用**具名 volume** `tw-stock-server-monitor_logs:/app/logs`
   （取代 compose 的相對 bind 掛載，避免 socket-bound runner 內相對路徑失效）。
   查看日誌用 `docker logs tw-stock-server-monitor`。

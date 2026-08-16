@@ -1,0 +1,129 @@
+# 推播鏈路本身的告警規則
+#
+# 「規則存在」不等於「告警送得出去」——本 repo 已經踩過同型的坑兩次：
+#   1. runner 容器 Exited(0) 四週沒人知道（沒有監控）。
+#   2. 規則檔存在但 Prometheus 沒掛載，/api/v1/rules 回空陣列（沒有效力）。
+# 推播管道是同一個形狀的第三個坑：Alertmanager 掛掉、路由寫錯或接收器死掉時，
+# 系統會安靜地「什麼都不發」，而沉默看起來跟一切正常一模一樣。
+#
+# 因此這裡的規則負責把「沉默」變成可觀測的訊號，彼此互相看守：
+#   Prometheus  ── 看 ──►  Alertmanager        （up / alertmanagers_discovered）
+#   Alertmanager ── 看 ──►  webhook 接收器      （notifications_failed_total）
+#   Watchdog 心跳 ── 看 ──►  上述整條鏈路        （心跳停了就是斷了）
+#
+# 誠實的限制：Prometheus 自己掛掉時沒有人能評估這些規則。要補上這一層，
+# 必須有堆疊之外的觀測者（例如外部推播管道 + 對方的心跳監控），
+# 待使用者提供 SMTP／Slack 憑證後才能成立，README 已列為待辦。
+
+groups:
+  - name: alert-delivery
+    interval: 30s
+    rules:
+      # ── 死人開關（dead man's switch）──────────────────────────
+      - alert: Watchdog
+        expr: vector(1)
+        for: 0m
+        labels:
+          severity: info
+          component: watchdog
+        annotations:
+          summary: "推播鏈路心跳（永遠觸發，屬正常現象）"
+          description: >-
+            這條告警刻意永遠處於觸發狀態，由 Alertmanager 每 2 分鐘送到本地
+            webhook 接收器。它的用途不是通知人，而是讓「整條推播鏈路還活著」
+            成為一個可量測的正向訊號：心跳一停，
+            tw_stock_alert_watchdog_last_timestamp_seconds 就不再更新，
+            AlertDeliveryStalled 會接手告警。
+
+      - alert: AlertDeliveryStalled
+        expr: >-
+          (time() - tw_stock_alert_watchdog_last_timestamp_seconds > 900)
+          and tw_stock_alert_receiver_up == 1
+        for: 5m
+        labels:
+          severity: critical
+          component: monitoring
+        annotations:
+          summary: "告警推播鏈路已停擺，通知可能送不出去"
+          description: >-
+            接收器仍在服務，但超過 15 分鐘沒收到 Watchdog 心跳（正常為每 2
+            分鐘一次）。代表 Prometheus 沒把告警送進 Alertmanager、
+            Alertmanager 路由設定有誤，或兩者之間的網路不通。
+            **此時所有告警都可能是靜默的，不要把沒有通知當成沒有問題。**
+          runbook: >-
+            依序檢查：docker ps 看 alertmanager 是否在跑；
+            Prometheus /api/v1/alertmanagers 是否列出 activeAlertmanagers；
+            docker logs alertmanager 看路由與 webhook 是否報錯。
+
+      - alert: AlertReceiverDown
+        expr: tw_stock_alert_receiver_up == 0
+        for: 5m
+        labels:
+          severity: critical
+          component: monitoring
+        annotations:
+          summary: "告警 webhook 接收器未在服務"
+          description: >-
+            Service Monitor 行程還在，但 webhook 接收器沒有啟動成功
+            （多半是埠被占用）。Alertmanager 送出的通知會全部失敗，
+            通知等於沒有落地。
+
+      - alert: AlertReceiverMetricMissing
+        expr: absent(tw_stock_alert_receiver_up)
+        for: 15m
+        labels:
+          severity: warning
+          component: monitoring
+        annotations:
+          summary: "找不到告警接收器的狀態指標"
+          description: >-
+            序列不存在，代表 Service Monitor 跑的是尚未內建接收器的舊版本
+            （例如 tag 打了但 deploy job 沒真的跑，舊容器續跑），或指標抓取
+            已中斷。此時 AlertReceiverDown 與 AlertDeliveryStalled 都只會安靜
+            地不觸發——「推播管道從未上線」不該是無聲的。
+          runbook: >-
+            docker logs tw-stock-server-monitor 確認接收器是否啟動；
+            並檢查該 tag 的 deploy pipeline 是否成功。
+
+      # ── Alertmanager 本身 ───────────────────────────────────────
+      - alert: AlertmanagerDown
+        expr: up{job="alertmanager"} == 0 or absent(up{job="alertmanager"})
+        for: 5m
+        labels:
+          severity: critical
+          component: monitoring
+        annotations:
+          summary: "Alertmanager 未在執行或未被抓取"
+          description: >-
+            Alertmanager 抓不到（容器停了、或 prometheus.yml 的 scrape job
+            被移除）。沒有 Alertmanager，所有告警規則都只會停在 ALERTS 序列裡
+            不會送出任何通知——正是本專案要消滅的無聲狀態。
+          runbook: >-
+            docker compose -f docker/docker-compose.yaml up -d alertmanager；
+            CI 的 deploy job 只重啟 Service Monitor，不會動這顆容器。
+
+      - alert: AlertNotificationFailing
+        expr: rate(alertmanager_notifications_failed_total[10m]) > 0
+        for: 10m
+        labels:
+          severity: critical
+          component: monitoring
+        annotations:
+          summary: "Alertmanager 送出通知持續失敗"
+          description: >-
+            Alertmanager 有告警要送但送不出去（接收器 {{ $labels.integration }}
+            持續回錯誤）。這是 Alertmanager 反過來看守接收器的訊號：
+            通知已產生但沒有任何人收到。
+
+      - alert: PrometheusNotConnectedToAlertmanager
+        expr: prometheus_notifications_alertmanagers_discovered < 1
+        for: 10m
+        labels:
+          severity: critical
+          component: monitoring
+        annotations:
+          summary: "Prometheus 沒有連上任何 Alertmanager"
+          description: >-
+            Prometheus 找不到任何 Alertmanager（多半是 prometheus.yml 的
+            alerting 區塊遺失或位址寫錯）。規則照常評估、ALERTS 序列照常產生，
+            但通知一則都不會送出——與「規則檔沒掛載」同一型的無聲失效。

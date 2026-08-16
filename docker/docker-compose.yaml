@@ -12,11 +12,15 @@ services:
       - /var/run/docker.sock:/var/run/docker.sock:ro
     expose:
       - "9102"
+      # Alertmanager webhook 接收器（本地推播管道）
+      - "9103"
     environment:
       - MONITOR_METRICS_PORT=9102
       - MONITOR_CHECK_INTERVAL=30
       - MONITOR_CHECK_TIMEOUT=5
-      - MONITOR_CONTAINERS=gitlab-runner,gitlab
+      - MONITOR_CONTAINERS=gitlab-runner,gitlab,alertmanager
+      - ALERT_RECEIVER_PORT=9103
+      - ALERT_LOG_DIR=/app/logs/alerts
       # 容器內須以 host.docker.internal 才連得到 host 上的自架 GitLab
       - GITLAB_URL=${GITLAB_URL:-http://host.docker.internal:8080}
       # 權杖由 host 環境變數或 docker/.env 提供，切勿寫進版本控制
@@ -42,6 +46,27 @@ services:
       - "--storage.tsdb.retention.time=30d"
     networks:
       - default
+      - db_network
+    restart: always
+
+  alertmanager:
+    image: prom/alertmanager:latest
+    container_name: alertmanager
+    volumes:
+      - ./alertmanager/alertmanager.yml:/etc/alertmanager/alertmanager.yml:ro
+      # 外部管道憑證（SMTP 密碼／Slack webhook URL）以檔案提供。
+      # Alertmanager 不會展開環境變數，故設定檔只能以 *_file 引用；
+      # 此目錄內容已被 .gitignore 排除，不會進版控。
+      - ./alertmanager/secrets:/etc/alertmanager/secrets:ro
+      - alertmanager_data:/alertmanager
+    expose:
+      - "9093"
+    command:
+      - "--config.file=/etc/alertmanager/alertmanager.yml"
+      - "--storage.path=/alertmanager"
+    networks:
+      - default
+      # 需與 Service Monitor 同網段才送得到 webhook 接收器
       - db_network
     restart: always
 
@@ -86,3 +111,4 @@ networks:
 volumes:
   prometheus_data:
   grafana_data:
+  alertmanager_data:
