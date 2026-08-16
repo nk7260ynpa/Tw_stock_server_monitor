@@ -19,6 +19,7 @@ Prometheus 指標。涵蓋四件事：
 """
 
 import os
+import re
 import time
 
 import requests
@@ -36,12 +37,23 @@ DEFAULT_INTERVAL = 300           # GitLab API 收集間隔（秒）
 DEFAULT_TIMEOUT = 10             # 單次 API 請求逾時（秒）
 DEFAULT_JOB_WINDOW_HOURS = 24    # 失敗 job 統計窗口（小時）
 DEFAULT_JOB_PAGE_SIZE = 30       # 每個專案抓取的最近失敗 job 數上限
+DEFAULT_PAGE_SIZE = 100          # 分頁查詢每頁筆數
+DEFAULT_MAX_PAGES = 5            # 分頁查詢頁數上限（避免異常時無限翻頁）
 
 # 沒有 runner 可接 job 的失敗原因（基礎設施問題，非程式碼問題）
 STUCK_FAILURE_REASON = "stuck_pending_no_matching_runners"
 
 # pipeline 不存在時使用的合成狀態值
 PIPELINE_STATUS_MISSING = "missing"
+
+# 真正代表「版本已上線」的 job 名稱。
+# tag pipeline 內含 deploy 與 mirror 兩個互不相依的 job，mirror 失敗
+# （例如 GitHub 端 non-fast-forward）不代表沒部署，故不能拿整條 pipeline
+# 的狀態當作部署結果，否則會產生永久誤報。
+DEPLOY_JOB_NAME = "deploy"
+
+# 版本 tag 格式（vX.Y.Z），用來在眾多 tag 中挑出最新版本
+_VERSION_TAG_PATTERN = re.compile(r"^v(\d+)\.(\d+)\.(\d+)$")
 
 
 class GitLabAPIError(Exception):
@@ -109,8 +121,12 @@ class GitLabClient:
         """
         url = "{}/api/v4{}".format(self.base_url, path)
         try:
+            # 不跟隨轉址：PRIVATE-TOKEN 是自訂標頭，requests 不會像
+            # Authorization 那樣在跨主機轉址時自動剝除，禁用轉址可避免
+            # 權杖被帶往非預期站台。
             response = self.session.get(
-                url, params=params, timeout=self.timeout
+                url, params=params, timeout=self.timeout,
+                allow_redirects=False,
             )
         except requests.RequestException as exc:
             raise GitLabAPIError(
@@ -129,6 +145,37 @@ class GitLabClient:
             raise GitLabAPIError(
                 "無法解析 GitLab API 回應（{}）: {}".format(path, exc)
             ) from exc
+
+    def get_all(self, path, params=None, per_page=DEFAULT_PAGE_SIZE,
+                max_pages=DEFAULT_MAX_PAGES):
+        """對清單型 API 逐頁取回所有結果。
+
+        單頁查詢在專案或 runner 數超過 `per_page` 時會靜默漏掉後面的資料，
+        導致「沒被掃到的專案永遠不會告警」，故清單型查詢一律走本方法。
+
+        Args:
+            path: 相對於 `/api/v4` 的路徑。
+            params: 額外的 query string 參數。
+            per_page: 每頁筆數。
+            max_pages: 頁數上限，避免異常時無限翻頁。
+
+        Returns:
+            list: 合併後的結果清單。
+
+        Raises:
+            GitLabAPIError: 任一頁查詢失敗。
+        """
+        merged = []
+        for page in range(1, max_pages + 1):
+            query = dict(params or {})
+            query.update({"per_page": per_page, "page": page})
+            batch = self.get(path, params=query)
+            if not batch:
+                break
+            merged.extend(batch)
+            if len(batch) < per_page:
+                break
+        return merged
 
 
 # ── 指標定義 ──────────────────────────────────────────────────────────
@@ -213,7 +260,8 @@ gitlab_failed_jobs = Gauge(
 # 各專案最新版本 tag 對應 pipeline 的狀態
 gitlab_tag_pipeline_status = Gauge(
     "tw_stock_gitlab_tag_pipeline_status",
-    "各專案最新 tag 對應 pipeline 的狀態（值恆為 1，missing 代表該 tag 沒有 pipeline）",
+    "各專案最新 tag 的部署狀態（值恆為 1；取 deploy job 狀態，無 deploy job "
+    "時退回 pipeline 狀態，missing 代表該 tag 沒有 pipeline）",
     ["project", "tag", "status"],
     registry=registry,
 )
@@ -245,6 +293,10 @@ _DYNAMIC_GAUGES = (
     gitlab_tag_undeployed_seconds,
 )
 
+# 上一輪成功取得的專案狀態（project path → state），
+# 供單一專案查詢失敗時沿用，避免序列忽有忽無。
+_LAST_PROJECT_STATES = {}
+
 
 # ── 資料蒐集 ──────────────────────────────────────────────────────────
 
@@ -268,10 +320,7 @@ def fetch_runner_states(client, group_id, now, logger=None):
     Raises:
         GitLabAPIError: 列表查詢失敗。
     """
-    runners = client.get(
-        "/groups/{}/runners".format(group_id),
-        params={"per_page": 100},
-    )
+    runners = client.get_all("/groups/{}/runners".format(group_id))
 
     states = []
     for runner in runners or []:
@@ -297,9 +346,83 @@ def fetch_runner_states(client, group_id, now, logger=None):
     return states
 
 
+def _select_latest_tag(tags):
+    """從 tag 清單挑出最新的版本 tag。
+
+    優先挑語意化版號最大的 `vX.Y.Z`（本專案群組以此格式觸發部署）；
+    沒有任何版本 tag 時退回 API 回傳的第一筆。這比單純依 API 排序可靠：
+    `order_by=updated` 實際上是依 commit 時間排序，對舊 commit 補打 tag
+    時會選錯。
+
+    Args:
+        tags: GitLab tags API 的回傳清單。
+
+    Returns:
+        dict: 選中的 tag；清單為空時回傳 None。
+    """
+    if not tags:
+        return None
+
+    versioned = []
+    for tag in tags:
+        match = _VERSION_TAG_PATTERN.match(tag.get("name") or "")
+        if match:
+            versioned.append((tuple(int(part) for part in match.groups()), tag))
+    if versioned:
+        return max(versioned, key=lambda item: item[0])[1]
+    return tags[0]
+
+
+def _resolve_deploy_status(client, project_id, pipeline, logger=None):
+    """判斷某條 tag pipeline 是否真的完成部署。
+
+    tag pipeline 內含 `deploy` 與 `mirror-to-github` 兩個 `needs: []` 的
+    獨立 job。鏡像失敗（例如 GitHub 端 non-fast-forward）不代表版本沒上線，
+    若直接拿 pipeline 狀態當部署結果會造成永久誤報，故以 `deploy` job 的
+    狀態為準；沒有 `deploy` job 的專案（未納入自動部署）則退回 pipeline 狀態。
+
+    Args:
+        client: `GitLabClient` 實例。
+        project_id: 專案 ID。
+        pipeline: pipeline dict（需含 `id` 與 `status`）。
+        logger: Logger 實例，可為 None。
+
+    Returns:
+        str: 部署狀態（`success`／`failed`／…）。
+    """
+    pipeline_status = pipeline.get("status") or PIPELINE_STATUS_MISSING
+    pipeline_id = pipeline.get("id")
+    if pipeline_id is None:
+        return pipeline_status
+
+    try:
+        jobs = client.get(
+            "/projects/{}/pipelines/{}/jobs".format(project_id, pipeline_id),
+            params={"per_page": DEFAULT_PAGE_SIZE, "include_retried": "true"},
+        )
+    except GitLabAPIError as exc:
+        if logger is not None:
+            logger.debug(
+                "無法取得 pipeline %s 的 job 清單，改用 pipeline 狀態: %s",
+                pipeline_id, exc,
+            )
+        return pipeline_status
+
+    deploy_jobs = [
+        job for job in jobs or [] if job.get("name") == DEPLOY_JOB_NAME
+    ]
+    if not deploy_jobs:
+        return pipeline_status
+    if any(job.get("status") == "success" for job in deploy_jobs):
+        return "success"
+    # 取最後一次重跑的結果
+    latest_job = max(deploy_jobs, key=lambda job: job.get("id") or 0)
+    return latest_job.get("status") or pipeline_status
+
+
 def fetch_project_state(client, project, now,
                         window_seconds=DEFAULT_JOB_WINDOW_HOURS * 3600,
-                        job_page_size=DEFAULT_JOB_PAGE_SIZE):
+                        job_page_size=DEFAULT_JOB_PAGE_SIZE, logger=None):
     """取得單一專案的 CI 狀態。
 
     Args:
@@ -308,6 +431,7 @@ def fetch_project_state(client, project, now,
         now: 現在時間（Unix epoch 秒）。
         window_seconds: 失敗 job 統計窗口（秒）。
         job_page_size: 每個專案抓取的最近失敗 job 數上限。
+        logger: Logger 實例，可為 None。
 
     Returns:
         dict: 專案 CI 狀態；專案完全沒有 pipeline（代表未設定 CI）時
@@ -357,25 +481,30 @@ def fetch_project_state(client, project, now,
     # 最新 tag 是否真的部署成功
     tags = client.get(
         "/projects/{}/repository/tags".format(project_id),
-        params={"order_by": "updated", "sort": "desc", "per_page": 1},
+        params={"order_by": "updated", "sort": "desc",
+                "per_page": DEFAULT_PAGE_SIZE},
     )
-    if tags:
-        tag = tags[0]
+    tag = _select_latest_tag(tags)
+    if tag:
         tag_name = tag.get("name") or ""
         tag_time = parse_iso_timestamp(
             tag.get("created_at") or (tag.get("commit") or {}).get("created_at")
         )
 
         if state["ref"] == tag_name:
-            tag_status = state["status"]
+            tag_pipeline = latest
         else:
             tag_pipelines = client.get(
                 "/projects/{}/pipelines".format(project_id),
                 params={"ref": tag_name, "per_page": 1},
             )
-            tag_status = (
-                tag_pipelines[0].get("status")
-                if tag_pipelines else PIPELINE_STATUS_MISSING
+            tag_pipeline = tag_pipelines[0] if tag_pipelines else None
+
+        if tag_pipeline is None:
+            tag_status = PIPELINE_STATUS_MISSING
+        else:
+            tag_status = _resolve_deploy_status(
+                client, project_id, tag_pipeline, logger
             )
 
         state["tag"] = tag_name
@@ -466,9 +595,9 @@ def collect_gitlab_ci(logger, client, group_id=DEFAULT_GROUP_ID, now=None,
         runner_states = fetch_runner_states(
             client, group_id, current_time, logger
         )
-        projects = client.get(
+        projects = client.get_all(
             "/groups/{}/projects".format(group_id),
-            params={"per_page": 100, "archived": "false"},
+            params={"archived": "false", "include_subgroups": "true"},
         )
     except GitLabAPIError as exc:
         gitlab_api_up.set(0)
@@ -476,19 +605,31 @@ def collect_gitlab_ci(logger, client, group_id=DEFAULT_GROUP_ID, now=None,
         return False
 
     project_states = []
+    seen_projects = set()
     for project in projects or []:
+        name = project.get("path") or str(project.get("id"))
+        seen_projects.add(name)
         try:
             state = fetch_project_state(
-                client, project, current_time, window_seconds
+                client, project, current_time, window_seconds, logger=logger
             )
         except GitLabAPIError as exc:
             logger.error(
-                "查詢專案 %s 的 CI 狀態失敗: %s",
-                project.get("path"), exc,
+                "查詢專案 %s 的 CI 狀態失敗，沿用上一輪數值: %s", name, exc
             )
+            # 沿用上一輪快取，避免間歇性錯誤讓序列消失、
+            # 進而重置告警的 for 計時器而永遠燒不起來。
+            cached = _LAST_PROJECT_STATES.get(name)
+            if cached is not None:
+                project_states.append(cached)
             continue
         if state is not None:
+            _LAST_PROJECT_STATES[name] = state
             project_states.append(state)
+
+    # 清掉已不存在（刪除或轉出）的專案快取
+    for name in set(_LAST_PROJECT_STATES) - seen_projects:
+        del _LAST_PROJECT_STATES[name]
 
     for gauge in _DYNAMIC_GAUGES:
         gauge.clear()

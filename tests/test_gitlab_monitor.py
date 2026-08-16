@@ -11,9 +11,11 @@ from unittest.mock import MagicMock, mock_open, patch
 import requests
 
 from src.gitlab_monitor import (
+    _LAST_PROJECT_STATES,
     STUCK_FAILURE_REASON,
     GitLabAPIError,
     GitLabClient,
+    _select_latest_tag,
     collect_gitlab_ci,
     fetch_project_state,
     fetch_runner_states,
@@ -75,10 +77,24 @@ class FakeGitLabClient:
                 return self.responses[keyed]
         return self.responses.get(path, [])
 
+    def get_all(self, path, params=None, per_page=None, max_pages=None):
+        """清單型查詢：假資料一次回完，不模擬分頁。
+
+        Args:
+            path: API 路徑。
+            params: query 參數。
+            per_page: 相容真實客戶端的簽章，測試中未使用。
+            max_pages: 相容真實客戶端的簽章，測試中未使用。
+
+        Returns:
+            預先準備的回應內容。
+        """
+        return self.get(path, params)
+
 
 def _build_responses(pipeline_status="success", tag="v2.15.0",
                      tag_status="success", failed_jobs=None,
-                     runner_online=True):
+                     runner_online=True, pipeline_jobs=None):
     """組出一份完整的假 API 回應。
 
     Args:
@@ -87,11 +103,19 @@ def _build_responses(pipeline_status="success", tag="v2.15.0",
         tag_status: 該 tag 對應 pipeline 的狀態。
         failed_jobs: 失敗 job 清單，None 代表沒有失敗 job。
         runner_online: runner 是否 online。
+        pipeline_jobs: tag pipeline 的 job 清單，None 時自動產生一個與
+            `tag_status` 同狀態的 deploy job。
 
     Returns:
         dict: 供 `FakeGitLabClient` 使用的回應表。
     """
+    if pipeline_jobs is None:
+        pipeline_jobs = [
+            {"id": 501, "name": "deploy", "status": tag_status},
+            {"id": 502, "name": "mirror-to-github", "status": tag_status},
+        ]
     return {
+        "/projects/9/pipelines/145/jobs": pipeline_jobs,
         "/groups/{}/runners".format(GROUP_ID): [
             {
                 "id": 1,
@@ -188,6 +212,41 @@ class TestGitLabClient(unittest.TestCase):
                           side_effect=requests.ConnectionError("down")):
             with self.assertRaises(GitLabAPIError):
                 client.get("/version")
+
+    def test_get_does_not_follow_redirects(self):
+        """不可跟隨轉址，避免 PRIVATE-TOKEN 被帶往其他站台。"""
+        client = GitLabClient(token="t")
+        response = MagicMock()
+        response.status_code = 200
+        response.json.return_value = []
+        with patch.object(client.session, "get", return_value=response) as get:
+            client.get("/version")
+        self.assertFalse(get.call_args.kwargs["allow_redirects"])
+
+    def test_get_all_merges_pages(self):
+        """清單型查詢應逐頁取回，不可只拿第一頁。"""
+        client = GitLabClient(token="t")
+        pages = [
+            [{"id": i} for i in range(2)],
+            [{"id": 2}],
+        ]
+
+        def fake_get(path, params=None):
+            return pages[params["page"] - 1]
+
+        with patch.object(client, "get", side_effect=fake_get):
+            result = client.get_all("/groups/38/projects", per_page=2)
+
+        self.assertEqual([item["id"] for item in result], [0, 1, 2])
+
+    def test_get_all_stops_at_max_pages(self):
+        """異常情況下不可無限翻頁。"""
+        client = GitLabClient(token="t")
+        with patch.object(client, "get", return_value=[{"id": 1}]) as get:
+            result = client.get_all("/x", per_page=1, max_pages=3)
+
+        self.assertEqual(get.call_count, 3)
+        self.assertEqual(len(result), 3)
 
     def test_get_invalid_json(self):
         """回應無法解析時應拋出 GitLabAPIError。"""
@@ -312,6 +371,75 @@ class TestFetchProjectState(unittest.TestCase):
         self.assertEqual(state["tag_status"], "missing")
         self.assertGreater(state["tag_undeployed_seconds"], 0)
 
+    def test_mirror_failure_does_not_count_as_undeployed(self):
+        """deploy 成功但 mirror 失敗時，不可誤判為「沒部署」。
+
+        tag pipeline 內 deploy 與 mirror 互不相依，鏡像失敗（例如 GitHub 端
+        non-fast-forward）是已知且重跑也不會過的情況；若拿整條 pipeline 的
+        狀態當部署結果會造成永久誤報。
+        """
+        jobs = [
+            {"id": 501, "name": "deploy", "status": "success"},
+            {"id": 502, "name": "mirror-to-github", "status": "failed"},
+        ]
+        client = FakeGitLabClient(
+            _build_responses(pipeline_status="failed", tag_status="failed",
+                             pipeline_jobs=jobs)
+        )
+        state = fetch_project_state(client, {"id": 9, "path": "p"}, NOW)
+
+        self.assertEqual(state["tag_status"], "success")
+        self.assertEqual(state["tag_undeployed_seconds"], 0)
+
+    def test_deploy_job_failure_is_reported(self):
+        """deploy job 失敗時仍應視為未部署。"""
+        jobs = [
+            {"id": 501, "name": "deploy", "status": "failed"},
+            {"id": 502, "name": "mirror-to-github", "status": "success"},
+        ]
+        client = FakeGitLabClient(
+            _build_responses(pipeline_status="failed", tag_status="failed",
+                             pipeline_jobs=jobs)
+        )
+        state = fetch_project_state(client, {"id": 9, "path": "p"}, NOW)
+
+        self.assertEqual(state["tag_status"], "failed")
+        self.assertGreater(state["tag_undeployed_seconds"], 1800)
+
+    def test_retried_deploy_job_success_wins(self):
+        """deploy 重跑成功時應以成功為準。"""
+        jobs = [
+            {"id": 501, "name": "deploy", "status": "failed"},
+            {"id": 601, "name": "deploy", "status": "success"},
+        ]
+        client = FakeGitLabClient(
+            _build_responses(pipeline_status="failed", tag_status="failed",
+                             pipeline_jobs=jobs)
+        )
+        state = fetch_project_state(client, {"id": 9, "path": "p"}, NOW)
+        self.assertEqual(state["tag_status"], "success")
+
+    def test_project_without_deploy_job_falls_back_to_pipeline(self):
+        """沒有 deploy job 的專案（未納入自動部署）應退回 pipeline 狀態。"""
+        jobs = [{"id": 502, "name": "mirror-to-github", "status": "failed"}]
+        client = FakeGitLabClient(
+            _build_responses(pipeline_status="failed", tag_status="failed",
+                             pipeline_jobs=jobs)
+        )
+        state = fetch_project_state(client, {"id": 9, "path": "p"}, NOW)
+        self.assertEqual(state["tag_status"], "failed")
+
+    def test_job_query_failure_falls_back_to_pipeline_status(self):
+        """job 清單查不到時應退回 pipeline 狀態，不應中斷整個專案。"""
+        client = FakeGitLabClient(
+            _build_responses(pipeline_status="failed", tag_status="failed"),
+            failing_paths=["/projects/9/pipelines/145/jobs"],
+        )
+        state = fetch_project_state(
+            client, {"id": 9, "path": "p"}, NOW, logger=MagicMock()
+        )
+        self.assertEqual(state["tag_status"], "failed")
+
     def test_tag_pipeline_reuses_latest_when_ref_matches(self):
         """最新 pipeline 的 ref 就是最新 tag 時不應多打一次 API。"""
         client = FakeGitLabClient(_build_responses())
@@ -324,8 +452,39 @@ class TestFetchProjectState(unittest.TestCase):
         self.assertEqual(ref_queries, [])
 
 
+class TestSelectLatestTag(unittest.TestCase):
+    """測試最新版本 tag 的挑選邏輯。"""
+
+    def test_picks_highest_semver(self):
+        """應挑語意化版號最大者，而非字典序或 API 順序。"""
+        tags = [
+            {"name": "v1.9.0"},
+            {"name": "v1.10.0"},
+            {"name": "v1.2.3"},
+        ]
+        self.assertEqual(_select_latest_tag(tags)["name"], "v1.10.0")
+
+    def test_ignores_non_version_tags(self):
+        """非 vX.Y.Z 格式的 tag 不應被誤選為最新版本。"""
+        tags = [{"name": "nightly"}, {"name": "v2.0.1"}]
+        self.assertEqual(_select_latest_tag(tags)["name"], "v2.0.1")
+
+    def test_falls_back_to_first_tag(self):
+        """完全沒有版本 tag 時退回 API 回傳的第一筆。"""
+        tags = [{"name": "nightly"}, {"name": "beta"}]
+        self.assertEqual(_select_latest_tag(tags)["name"], "nightly")
+
+    def test_empty_tags(self):
+        """沒有任何 tag 時回傳 None。"""
+        self.assertIsNone(_select_latest_tag([]))
+
+
 class TestCollectGitLabCI(unittest.TestCase):
     """測試 GitLab CI 指標收集流程。"""
+
+    def setUp(self):
+        """清空跨輪快取，避免測試互相污染。"""
+        _LAST_PROJECT_STATES.clear()
 
     def test_incident_signals_are_exposed(self):
         """事故情境（runner 離線 + job 卡住 + tag 未部署）應完整反映到指標。"""
@@ -457,6 +616,72 @@ class TestCollectGitLabCI(unittest.TestCase):
         logger.error.assert_called()
         self.assertEqual(
             registry.get_sample_value("tw_stock_gitlab_runners_total"), 1
+        )
+
+    def test_project_failure_reuses_cached_state(self):
+        """專案間歇性查詢失敗時應沿用上一輪數值，序列不可忽有忽無。
+
+        序列一旦消失，下一輪回來時告警的 for 計時器會重新歸零，
+        真正的問題就永遠燒不起來。
+        """
+        logger = MagicMock()
+        healthy = FakeGitLabClient(
+            _build_responses(pipeline_status="failed", tag="v2.13.0",
+                             tag_status="failed")
+        )
+        collect_gitlab_ci(logger, healthy, GROUP_ID, now=NOW)
+
+        broken = FakeGitLabClient(
+            _build_responses(pipeline_status="failed", tag="v2.13.0",
+                             tag_status="failed"),
+            failing_paths=["/projects/9/pipelines"],
+        )
+        collect_gitlab_ci(logger, broken, GROUP_ID, now=NOW)
+
+        self.assertEqual(
+            registry.get_sample_value(
+                "tw_stock_gitlab_pipeline_status",
+                {"project": "Tw_stock_DB_Operating", "ref": "v2.13.0",
+                 "status": "failed"},
+            ),
+            1,
+        )
+
+    def test_cache_is_pruned_when_project_disappears(self):
+        """專案從群組移除後，快取與序列都應跟著消失。"""
+        logger = MagicMock()
+        collect_gitlab_ci(
+            logger, FakeGitLabClient(_build_responses()), GROUP_ID, now=NOW
+        )
+        self.assertIn("Tw_stock_DB_Operating", _LAST_PROJECT_STATES)
+
+        responses = _build_responses()
+        responses["/groups/{}/projects".format(GROUP_ID)] = []
+        collect_gitlab_ci(
+            logger, FakeGitLabClient(responses), GROUP_ID, now=NOW
+        )
+
+        self.assertEqual(_LAST_PROJECT_STATES, {})
+        self.assertIsNone(
+            registry.get_sample_value(
+                "tw_stock_gitlab_pipeline_status",
+                {"project": "Tw_stock_DB_Operating", "ref": "v2.15.0",
+                 "status": "success"},
+            )
+        )
+
+    def test_subgroup_projects_are_included(self):
+        """專案查詢必須帶 include_subgroups，否則子群組專案永遠不會被監控。"""
+        client = FakeGitLabClient(_build_responses())
+        collect_gitlab_ci(MagicMock(), client, GROUP_ID, now=NOW)
+
+        project_calls = [
+            call for call in client.calls
+            if call[0] == "/groups/{}/projects".format(GROUP_ID)
+        ]
+        self.assertTrue(project_calls)
+        self.assertEqual(
+            project_calls[0][1].get("include_subgroups"), "true"
         )
 
     def test_last_collect_timestamp_is_updated(self):
