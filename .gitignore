@@ -216,3 +216,7 @@ logs/
 
 # 告警演練（scripts/alert_drill.sh）的暫存產物
 .drill/
+
+# Alertmanager 外部管道憑證（由使用者提供，絕不進版控）
+docker/alertmanager/secrets/*
+!docker/alertmanager/secrets/.gitkeep

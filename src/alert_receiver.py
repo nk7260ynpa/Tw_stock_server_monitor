@@ -80,7 +80,7 @@ def _resolve_log_dir():
     return os.environ.get("ALERT_LOG_DIR", DEFAULT_LOG_DIR)
 
 
-def _write_notification(record, log_dir):
+def _write_notification(record, log_dir, logger=None):
     """把一則通知附加寫入當日 JSON Lines 檔。
 
     落地為檔案而非只留在記憶體，是為了在推播管道尚未接上外部通道
@@ -89,6 +89,7 @@ def _write_notification(record, log_dir):
     Args:
         record: 要寫入的 dict。
         log_dir: 落地目錄。
+        logger: Logger 實例，可為 None。
 
     Returns:
         str: 實際寫入的檔案路徑；寫入失敗時為 None。
@@ -103,6 +104,9 @@ def _write_notification(record, log_dir):
             handle.write(json.dumps(record, ensure_ascii=False) + "\n")
         return path
     except OSError:
+        # 寫不進帳本本身就是要被看見的事，不可靜默（通知仍會進專案日誌）
+        if logger:
+            logger.exception("告警通知落地失敗，目錄 %s", log_dir)
         return None
 
 
@@ -143,7 +147,7 @@ def handle_payload(payload, logger=None, log_dir=None):
         handled += 1
 
         if alertname == WATCHDOG_ALERTNAME:
-            # 心跳只更新時間戳，不落地也不寫 log，否則每 5 分鐘洗版一次
+            # 心跳只更新時間戳，不落地也不寫 log，否則每 2 分鐘洗版一次
             watchdog_timestamp.set(now)
             continue
 
@@ -163,7 +167,7 @@ def handle_payload(payload, logger=None, log_dir=None):
             "starts_at": alert.get("startsAt"),
             "ends_at": alert.get("endsAt"),
         }
-        _write_notification(record, log_dir)
+        _write_notification(record, log_dir, logger)
 
         log = logger.error if severity == "critical" else logger.warning
         if status == "resolved":
@@ -197,16 +201,20 @@ class _WebhookHandler(BaseHTTPRequestHandler):
         if self.logger:
             self.logger.debug("webhook %s", fmt % args)
 
-    def _respond(self, code, body=b""):
+    def _respond(self, code, body=b"", close=False):
         """回覆固定內容。
 
         Args:
             code: HTTP 狀態碼。
             body: 回應主體（bytes）。
+            close: 是否要求關閉連線（未讀完請求主體時必須為 True）。
         """
         self.send_response(code)
         self.send_header("Content-Type", "text/plain; charset=utf-8")
         self.send_header("Content-Length", str(len(body)))
+        if close:
+            self.send_header("Connection", "close")
+            self.close_connection = True
         self.end_headers()
         if body:
             self.wfile.write(body)
@@ -226,7 +234,10 @@ class _WebhookHandler(BaseHTTPRequestHandler):
             length = 0
 
         if length > MAX_BODY_BYTES:
-            self._respond(413, b"payload too large")
+            # 不讀主體（讀了就失去上限的意義），因此必須關閉連線：
+            # keep-alive 下未讀完的位元組會被當成下一個請求的起始，
+            # 之後所有通知都會被解析成垃圾——推播管道靜默壞掉。
+            self._respond(413, b"payload too large", close=True)
             return
 
         raw = self.rfile.read(length) if length else b""

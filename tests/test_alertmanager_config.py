@@ -38,6 +38,9 @@ RUNNER_DOWN_INHIBITED = {
 # 心跳告警名稱，須與 src/alert_receiver.py 一致
 WATCHDOG_ALERTNAME = "Watchdog"
 
+# 憑證檔在容器內的掛載點，須與 docker-compose.yaml 一致
+SECRETS_MOUNT_PATH = "/etc/alertmanager/secrets/"
+
 _ALERTNAME_PATTERN = re.compile(r'alertname\s*=~?\s*"([^"]+)"')
 _DURATION_PATTERN = re.compile(r"^(\d+)([smhd])$")
 _DURATION_UNITS = {"s": 1, "m": 60, "h": 3600, "d": 86400}
@@ -156,7 +159,7 @@ class TestAlertmanagerConfig(unittest.TestCase):
                 )
 
     def test_root_route_has_grouping(self):
-        """根路由必須設定分組，否則 18 條規則會各發一封。"""
+        """根路由必須設定分組，否則每條規則會各發一封。"""
         route = self.config["route"]
         self.assertTrue(route.get("group_by"))
         for key in ("group_wait", "group_interval", "repeat_interval"):
@@ -254,7 +257,13 @@ class TestAlertmanagerConfig(unittest.TestCase):
         return None
 
     def test_no_hardcoded_credentials(self):
-        """設定檔不得含硬編憑證；外部管道範本必須維持註解狀態。"""
+        """設定檔不得含硬編憑證；外部管道範本必須維持註解狀態。
+
+        只擋 **inline 值**（`auth_password: xxx`），不擋 `auth_password_file`：
+        本檔進版控，而 Alertmanager **不會展開環境變數**，因此密碼唯一安全的
+        提供方式就是 `*_file` 指向被 .gitignore 排除的檔案。把 `*_file` 一併
+        擋掉會反過來逼人把密碼寫成 inline，適得其反。
+        """
         with open(ALERTMANAGER_CONFIG, encoding="utf-8") as handle:
             active_lines = [
                 line for line in handle
@@ -262,9 +271,31 @@ class TestAlertmanagerConfig(unittest.TestCase):
             ]
         joined = "".join(active_lines)
         for forbidden in ("auth_password", "api_url", "smarthost",
-                          "auth_username"):
+                          "auth_username", "auth_secret", "bearer_token"):
             with self.subTest(keyword=forbidden):
-                self.assertNotIn(forbidden, joined)
+                pattern = re.compile(
+                    r"^\s*{}\s*:".format(forbidden), re.MULTILINE
+                )
+                self.assertIsNone(
+                    pattern.search(joined),
+                    "{} 不可寫成 inline 值，請改用 {}_file".format(
+                        forbidden, forbidden
+                    ),
+                )
+
+    def test_credential_files_live_outside_version_control(self):
+        """`*_file` 憑證路徑必須指向被 .gitignore 排除的目錄。"""
+        with open(ALERTMANAGER_CONFIG, encoding="utf-8") as handle:
+            content = handle.read()
+
+        for path in re.findall(r"_file:\s*(\S+)", content):
+            with self.subTest(path=path):
+                self.assertTrue(
+                    path.startswith(SECRETS_MOUNT_PATH),
+                    "憑證檔應放在 {} 下（該目錄不進版控）".format(
+                        SECRETS_MOUNT_PATH
+                    ),
+                )
 
 
 if __name__ == "__main__":

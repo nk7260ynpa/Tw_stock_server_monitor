@@ -18,7 +18,8 @@ Tw_stock_server_monitor/
 │   ├── Dockerfile                        # Docker image 定義
 │   ├── docker-compose.yaml               # Docker Compose 設定（含監控服務）
 │   ├── alertmanager/
-│   │   └── alertmanager.yml              # 告警路由、分組與抑制規則
+│   │   ├── alertmanager.yml              # 告警路由、分組與抑制規則
+│   │   └── secrets/                      # 外部管道憑證（不進版控）
 │   ├── prometheus/
 │   │   ├── prometheus.yml                # Prometheus 設定檔
 │   │   └── rules/
@@ -323,6 +324,7 @@ TCP 探測不到**的 CI 容器。監控對象由 `MONITOR_CONTAINERS` 指定，
 | `Watchdog` | info | 永遠觸發的心跳（0m），用途見下方死人開關 |
 | `AlertDeliveryStalled` | critical | 逾 15 分鐘沒收到 Watchdog 心跳（5m） |
 | `AlertReceiverDown` | critical | 本地告警接收器未在服務（5m） |
+| `AlertReceiverMetricMissing` | warning | 查不到接收器狀態指標（15m），例如舊版本續跑 |
 | `AlertmanagerDown` | critical | Alertmanager 抓不到或已停擺（5m） |
 | `AlertNotificationFailing` | critical | Alertmanager 推播持續失敗（10m） |
 | `PrometheusNotConnectedToAlertmanager` | critical | Prometheus 找不到任何 Alertmanager（10m） |
@@ -374,7 +376,7 @@ Prometheus ──告警──► Alertmanager ──分組/抑制──► 告�
 | 考量 | Alertmanager | Grafana contact point |
 |------|--------------|----------------------|
 | 抑制（inhibition） | 原生 `inhibit_rules`，宣告式 | **不支援**，只能靠 mute timing／notification policy 勉強近似 |
-| 與現有規則的關係 | 18 條規則本來就是 Prometheus 原生格式，直接沿用 | 需改寫成 Grafana 管理式告警，等於維護兩套 |
+| 與現有規則的關係 | 既有規則本來就是 Prometheus 原生格式，直接沿用 | 需改寫成 Grafana 管理式告警，等於維護兩套 |
 | 設定是否進版控 | `docker/alertmanager/alertmanager.yml` 進 repo，可被測試 | 設定存在 Grafana 資料庫，改動不留痕跡 |
 | 是否需要憑證 | 不需要 | 對 Grafana 內建 Alertmanager 送告警需要 Grafana 認證 |
 
@@ -403,6 +405,11 @@ warning」這種粗糙抑制——後者會把不相干的問題一起消音，�
 > 抑制最典型的失效是**安靜地不生效**：告警名稱打錯一個字，`amtool check-config`
 > 照樣通過，抑制卻永遠不會發生。`tests/test_alertmanager_config.py` 因此逐一
 > 比對抑制規則裡的名稱是否真的存在於規則檔，並檢查上表第一列的必要抑制集合。
+>
+> **已知取捨**：第一列連 `GitLabPipelineFailed` 一起抑制，因此 runner 停擺
+> 期間真實的「程式碼失敗」也會被一併消音，要等 runner 復原後才會重新送出。
+> 這是刻意的選擇——runner 掛掉時所有 pipeline 都會失敗，不抑制就會被上百則
+> 假陽性淹沒；而 runner 一修好，仍然失敗的 pipeline 會在下一個評估週期再叫。
 
 #### 誰來監控告警系統本身
 
@@ -478,13 +485,28 @@ PY
    |------|-----------|---------|
    | Email | `smarthost`（SMTP 主機:埠，如 `smtp.gmail.com:587`） | 郵件服務商文件 |
    | Email | `auth_username`（寄件帳號） | 你的信箱帳號 |
-   | Email | `auth_password`（**應用程式專用密碼**，非登入密碼） | Gmail：帳戶 → 安全性 → 兩步驟驗證 → 應用程式密碼 |
+   | Email | **應用程式專用密碼**（非登入密碼） | Gmail：帳戶 → 安全性 → 兩步驟驗證 → 應用程式密碼 |
    | Email | `from` / `to`（寄件人／收件人） | 自行決定 |
-   | Slack | `api_url`（Incoming Webhook URL） | Slack → Apps → Incoming Webhooks → Add to Slack |
+   | Slack | **Incoming Webhook URL** | Slack → Apps → Incoming Webhooks → Add to Slack |
    | Slack | `channel`（頻道名稱） | 自行決定 |
 
-2. 把憑證寫入 `docker/.env`（已被 `.gitignore` 排除，**不會進版控**）。
-3. 解除 `alertmanager.yml` 底部對應區塊的註解，並在 route 加上該 receiver；
+2. 把**密碼類**設定寫成檔案放進 `docker/alertmanager/secrets/`
+   （該目錄內容已被 `.gitignore` 排除，**不會進版控**）：
+
+   ```bash
+   printf '%s' '<應用程式密碼>' > docker/alertmanager/secrets/smtp_password
+   printf '%s' '<Slack Webhook URL>' > docker/alertmanager/secrets/slack_webhook_url
+   chmod 600 docker/alertmanager/secrets/*
+   ```
+
+   > **為何不是 `docker/.env`**：Alertmanager **不會展開設定檔中的環境變數**，
+   > `.env` 只對 Docker Compose 本身有效。若把密碼寫成 inline 值，就等於把它
+   > 提交進版控——因此設定檔一律用 `auth_password_file` / `api_url_file`
+   > 引用容器內的 `/etc/alertmanager/secrets/`（compose 已掛載該目錄）。
+   > `tests/test_alertmanager_config.py` 會擋下 inline 憑證。
+
+3. 解除 `alertmanager.yml` 底部對應區塊的註解（非密碼欄位如 `to` / `from` /
+   `smarthost` 可直接填），並在 route 加上該 receiver；
    建議搭配 `continue: true` 與本地管道併送，外部服務掛掉時仍留有本地紀錄。
 4. 套用設定並實測：
 

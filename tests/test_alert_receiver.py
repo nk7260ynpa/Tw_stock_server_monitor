@@ -307,6 +307,44 @@ class TestReceiverServer(unittest.TestCase):
         self.assertEqual(code, 404)
 
 
+class TestHeartbeatInitialisation(unittest.TestCase):
+    """心跳 Gauge 的初始值（v1.2.0 踩過的坑，需防迴歸）。"""
+
+    def test_heartbeat_initialised_at_startup(self):
+        """啟動時心跳須設為當下時間，不可留 Gauge 預設值 0。
+
+        留 0 會讓 `time() - 0` 變成天文數字，`AlertDeliveryStalled` 在開機
+        瞬間就永久誤報；設成啟動時間則「開機後始終收不到心跳」仍抓得到。
+        """
+        watchdog_timestamp.set(0)
+        started_at = time.time()
+
+        server = start_alert_receiver(_FakeLogger(), port=0, log_dir=None)
+        self.addCleanup(server.server_close)
+        self.addCleanup(server.shutdown)
+
+        value = watchdog_timestamp._value.get()
+        self.assertGreaterEqual(value, started_at)
+        self.assertLessEqual(value, time.time())
+
+
+class TestWriteNotificationFailure(unittest.TestCase):
+    """落地失敗時的可觀測性。"""
+
+    def test_write_failure_is_logged_not_silent(self):
+        """寫不進帳本本身要被看見；靜默吞掉等於帳本悄悄斷檔。"""
+        logger = _FakeLogger()
+        # 用一個「存在但不是目錄」的路徑逼出 OSError
+        handle, path = tempfile.mkstemp(prefix="alert-notadir-")
+        os.close(handle)
+        self.addCleanup(os.remove, path)
+
+        result = alert_receiver._write_notification({"a": 1}, path, logger)
+
+        self.assertIsNone(result)
+        self.assertIn("exception", [level for level, _ in logger.records])
+
+
 class TestStartFailure(unittest.TestCase):
     """啟動失敗的處理。"""
 

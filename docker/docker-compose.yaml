@@ -54,6 +54,10 @@ services:
     container_name: alertmanager
     volumes:
       - ./alertmanager/alertmanager.yml:/etc/alertmanager/alertmanager.yml:ro
+      # 外部管道憑證（SMTP 密碼／Slack webhook URL）以檔案提供。
+      # Alertmanager 不會展開環境變數，故設定檔只能以 *_file 引用；
+      # 此目錄內容已被 .gitignore 排除，不會進版控。
+      - ./alertmanager/secrets:/etc/alertmanager/secrets:ro
       - alertmanager_data:/alertmanager
     expose:
       - "9093"

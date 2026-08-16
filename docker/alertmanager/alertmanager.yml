@@ -2,7 +2,7 @@
 #
 # 設計目標（依 2026-07/08「runner Exited(0) 四週零告警」事故的教訓）：
 #   1. 告警要真的送得出去，而不是只存在 Prometheus 的 ALERTS 序列裡。
-#   2. **一次事故只發一則通知**。18 條規則同時響會被當成噪音關掉，
+#   2. **一次事故只發一則通知**。數十條規則同時響會被當成噪音關掉，
 #      那等於回到沒有告警的原點，所以 grouping 與 inhibition 是必要設計、
 #      不是裝飾。
 #   3. 推播管道自己斷掉時要看得出來（Watchdog 心跳，見最下方 receiver）。
@@ -108,11 +108,14 @@ receivers:
 
   # ── 以下為需要使用者憑證的外部管道範本，預設停用 ──────────────
   #
-  # 取得憑證後，把對應區塊解除註解並改到上方 route 的 receiver，
-  # 建議寫成 `receiver: local-webhook` + 額外的 email/slack receiver 並用
-  # `continue: true` 併送，讓本地紀錄與外部推播同時保留。
-  # 憑證請放在 docker/.env（已被 .gitignore 排除），
-  # 切勿直接寫進本檔或 commit。詳見 README「設定外部推播管道」。
+  # 取得憑證後，把對應區塊解除註解並加到上方 route 的 routes 中，
+  # 搭配 `continue: true` 與本地管道併送，外部服務掛掉時仍留有本地紀錄。
+  #
+  # **密碼一律走 `*_file`，不可寫成 inline 值**：本檔進版控，而
+  # Alertmanager **不會展開環境變數**（放 docker/.env 沒有用），
+  # 唯一安全的做法是把密碼放進 docker/alertmanager/secrets/ 下的檔案
+  # （該目錄已被 .gitignore 排除），再以檔案路徑引用。
+  # 詳見 README「設定外部推播管道」。
   #
   # - name: email
   #   email_configs:
@@ -120,11 +123,11 @@ receivers:
   #       from: "<寄件人>"
   #       smarthost: "<SMTP 主機>:587"
   #       auth_username: "<帳號>"
-  #       auth_password: "<應用程式密碼>"
+  #       auth_password_file: /etc/alertmanager/secrets/smtp_password
   #       send_resolved: true
   #
   # - name: slack
   #   slack_configs:
-  #     - api_url: "<Slack Incoming Webhook URL>"
+  #     - api_url_file: /etc/alertmanager/secrets/slack_webhook_url
   #       channel: "#alerts"
   #       send_resolved: true

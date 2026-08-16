@@ -68,6 +68,23 @@ groups:
             （多半是埠被占用）。Alertmanager 送出的通知會全部失敗，
             通知等於沒有落地。
 
+      - alert: AlertReceiverMetricMissing
+        expr: absent(tw_stock_alert_receiver_up)
+        for: 15m
+        labels:
+          severity: warning
+          component: monitoring
+        annotations:
+          summary: "找不到告警接收器的狀態指標"
+          description: >-
+            序列不存在，代表 Service Monitor 跑的是尚未內建接收器的舊版本
+            （例如 tag 打了但 deploy job 沒真的跑，舊容器續跑），或指標抓取
+            已中斷。此時 AlertReceiverDown 與 AlertDeliveryStalled 都只會安靜
+            地不觸發——「推播管道從未上線」不該是無聲的。
+          runbook: >-
+            docker logs tw-stock-server-monitor 確認接收器是否啟動；
+            並檢查該 tag 的 deploy pipeline 是否成功。
+
       # ── Alertmanager 本身 ───────────────────────────────────────
       - alert: AlertmanagerDown
         expr: up{job="alertmanager"} == 0 or absent(up{job="alertmanager"})
@@ -79,7 +96,7 @@ groups:
           summary: "Alertmanager 未在執行或未被抓取"
           description: >-
             Alertmanager 抓不到（容器停了、或 prometheus.yml 的 scrape job
-            被移除）。沒有 Alertmanager，18 條規則全部只會停在 ALERTS 序列裡
+            被移除）。沒有 Alertmanager，所有告警規則都只會停在 ALERTS 序列裡
             不會送出任何通知——正是本專案要消滅的無聲狀態。
           runbook: >-
             docker compose -f docker/docker-compose.yaml up -d alertmanager；
