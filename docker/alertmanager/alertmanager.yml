@@ -75,10 +75,12 @@ inhibit_rules:
 
   # 4. Service Monitor 整個不見或停擺 → 它產出的所有指標都是舊值，
   #    下游告警不可信。先修監控本身。
+  #    AlertReceiverMetricMissing 也在此列：接收器跑在 Service Monitor 行程內，
+  #    行程不見時「指標缺席」與「監控缺席」是同一件事，不必發第二則。
   - source_matchers:
       - alertname =~ "ServiceMonitorMetricsMissing|ServiceMonitorCheckStalled"
     target_matchers:
-      - alertname =~ "TwStockServiceDown|CIContainerDown|GitLabRunnerContainerDown|RunnerContainerMetricMissing|DockerApiUnreachable"
+      - alertname =~ "TwStockServiceDown|CIContainerDown|GitLabRunnerContainerDown|RunnerContainerMetricMissing|DockerApiUnreachable|AlertReceiverMetricMissing"
 
   # 5. Alertmanager 自己掛了 → 通知本來就送不出去，
   #    「推播鏈路停擺」是同一件事，不必再發第二則。

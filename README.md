@@ -421,8 +421,14 @@ warning」這種粗糙抑制——後者會把不相干的問題一起消音，�
 | Prometheus 沒接到 Alertmanager | `PrometheusNotConnectedToAlertmanager` |
 | Alertmanager 掛了 | `AlertmanagerDown`（Prometheus 抓 `up{job="alertmanager"}`） |
 | Alertmanager 送不出去 | `AlertNotificationFailing`（`alertmanager_notifications_failed_total`） |
-| 接收器掛了 | `AlertReceiverDown` |
+| 接收器掛了 | `AlertReceiverDown`（另有 `AlertReceiverMetricMissing` 抓「指標根本不存在」，例如舊版本容器續跑） |
 | 上述以外的任何一段斷掉 | `Watchdog` 心跳停止 → `AlertDeliveryStalled` |
+
+> **注意這張表的自我指涉**：接收器是目前**唯一**的 receiver，所以
+> `AlertReceiverDown` / `AlertReceiverMetricMissing` / `AlertNotificationFailing`
+> 一旦觸發，它們自己也送不出去，只會留在 Prometheus 的 `ALERTS` 序列與
+> Grafana 的「告警推播鏈路」面板上。接上外部管道（下方 runbook）後才有
+> 真正的第二條腿。
 
 `Watchdog` 是 **死人開關（dead man's switch）**：一條 `vector(1)` 永遠觸發的
 告警，每 2 分鐘經由完整鏈路送到接收器一次。接收器把它記成
@@ -450,6 +456,10 @@ Service Monitor 行程內建 webhook 接收器（`src/alert_receiver.py`，port 
 | `tw_stock_alert_receiver_up` | 接收器是否服務中 |
 | `tw_stock_alert_last_notification_timestamp_seconds` | 最近一次收到通知的時間 |
 | `tw_stock_alert_watchdog_last_timestamp_seconds` | 最近一次心跳時間 |
+
+> 落地檔按日切檔但**沒有自動清除**，長期會在具名 volume
+> `tw-stock-server-monitor_logs` 內累積（心跳不落地，故量很小：只有真正的
+> 告警才寫入）。需要時自行刪除舊檔即可。
 
 ```bash
 # 查看今天送出的告警通知
@@ -497,6 +507,10 @@ PY
    printf '%s' '<應用程式密碼>' > docker/alertmanager/secrets/smtp_password
    printf '%s' '<Slack Webhook URL>' > docker/alertmanager/secrets/slack_webhook_url
    chmod 600 docker/alertmanager/secrets/*
+
+   # Linux 部署另需這一步：容器內以 nobody(65534) 執行，600 會讓它讀不到
+   # 憑證而啟動失敗。macOS 的 Docker Desktop 會自動 remap 擁有者，不需要。
+   sudo chown 65534 docker/alertmanager/secrets/*
    ```
 
    > **為何不是 `docker/.env`**：Alertmanager **不會展開設定檔中的環境變數**，
@@ -740,6 +754,15 @@ docker build  →  docker rm -f tw-stock-server-monitor  →  docker run（新 i
 >
 > 換句話說，**改 `alertmanager.yml` 或告警規則不會被 CI 自動套用**，需依
 > 「套用新的告警規則或推播設定」手動重啟那兩顆容器。
+>
+> **順序很重要：先手動起 Prometheus / Alertmanager，再打 tag。** Service
+> Monitor 的 `MONITOR_CONTAINERS` 已納入 `alertmanager`，若先打 tag、
+> Alertmanager 卻還沒起來，`CIContainerDown` 與 `AlertmanagerDown` 會立刻
+> 觸發，而此時偏偏沒有任何管道送得出去：
+>
+> ```bash
+> docker compose -f docker/docker-compose.yaml up -d prometheus alertmanager
+> ```
 
 部署細節：
 
