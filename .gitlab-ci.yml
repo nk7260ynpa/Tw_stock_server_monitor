@@ -58,7 +58,8 @@ deploy:
     CONTAINER: "tw-stock-server-monitor"          # 只動這顆 Service Monitor 容器
     LOGS_VOLUME: "tw-stock-server-monitor_logs"   # 具名 volume（取代 compose 的相對 bind）
     LOGS_PATH: "/app/logs"
-    MONITOR_CONTAINERS: "gitlab-runner,gitlab"    # CI 基礎設施容器存活監控對象
+    # CI 基礎設施容器存活監控對象（含 alertmanager：推播管道斷了要看得見）
+    MONITOR_CONTAINERS: "gitlab-runner,gitlab,alertmanager"
     MONITOR_GITLAB_URL: "http://host.docker.internal:8080"  # 容器內連 host 上的 GitLab
     MONITOR_GITLAB_GROUP_ID: "38"                 # twstock 群組
     # MONITOR_GITLAB_TOKEN 為具 read_api scope 的權杖，
@@ -80,7 +81,8 @@ deploy:
     # 3) run：以新 image 啟動 Service Monitor（單一容器）。
     #    --network db_network：對其他服務做 TCP 探測，且讓 Prometheus 以
     #    容器名於 db_network 抓取 9102 指標。
-    #    --expose 9102：僅容器內部暴露（不對外 publish），與 compose 一致。
+    #    --expose 9102/9103：僅容器內部暴露（不對外 publish），與 compose 一致；
+    #    9103 是 Alertmanager 送通知進來的 webhook 接收器。
     #    掛載 docker.sock（唯讀）：監控 gitlab-runner 等不 publish port 的
     #    CI 容器是否存活，TCP 探測對它們無效。
     - docker run -d
@@ -90,10 +92,13 @@ deploy:
         --volume "$LOGS_VOLUME:$LOGS_PATH"
         --volume /var/run/docker.sock:/var/run/docker.sock:ro
         --expose 9102
+        --expose 9103
         -e MONITOR_METRICS_PORT=9102
         -e MONITOR_CHECK_INTERVAL=30
         -e MONITOR_CHECK_TIMEOUT=5
         -e MONITOR_CONTAINERS="$MONITOR_CONTAINERS"
+        -e ALERT_RECEIVER_PORT=9103
+        -e ALERT_LOG_DIR="$LOGS_PATH/alerts"
         -e GITLAB_URL="$MONITOR_GITLAB_URL"
         -e GITLAB_GROUP_ID="$MONITOR_GITLAB_GROUP_ID"
         -e GITLAB_CHECK_INTERVAL=300

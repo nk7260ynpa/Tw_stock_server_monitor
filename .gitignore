@@ -213,3 +213,6 @@ CLAUDE.md
 # Logs
 logs/
 .DS_Store
+
+# 告警演練（scripts/alert_drill.sh）的暫存產物
+.drill/
