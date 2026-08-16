@@ -1,0 +1,47 @@
+# Tw_stock 服務與監控自身健康的告警規則
+#
+# 指標來源：Service Monitor 的 TCP 探測（src/main.py）與 Prometheus 自身的
+# `up` 指標。CI 相關告警另見 ci_alerts.yml。
+
+groups:
+  - name: tw-stock-services
+    interval: 30s
+    rules:
+      - alert: TwStockServiceDown
+        expr: tw_stock_service_up == 0
+        for: 5m
+        labels:
+          severity: critical
+          component: service
+        annotations:
+          summary: "服務 {{ $labels.service }} 無法連線"
+          description: >-
+            對 {{ $labels.host }}:{{ $labels.port }} 的 TCP 探測連續失敗超過
+            5 分鐘，該 Tw_stock 微服務可能已停止或網路不通。
+
+  - name: monitoring-self-health
+    interval: 30s
+    rules:
+      - alert: PrometheusTargetDown
+        expr: up == 0
+        for: 10m
+        labels:
+          severity: warning
+          component: monitoring
+        annotations:
+          summary: "Prometheus 抓取目標 {{ $labels.job }} 失效"
+          description: >-
+            Prometheus 已連續 10 分鐘抓不到 {{ $labels.instance }}，
+            該來源的所有指標與告警都已停止更新。
+
+      - alert: ServiceMonitorMetricsMissing
+        expr: absent(tw_stock_service_up)
+        for: 10m
+        labels:
+          severity: critical
+          component: monitoring
+        annotations:
+          summary: "Service Monitor 指標完全消失"
+          description: >-
+            找不到任何 tw_stock_service_up 序列，代表 Service Monitor 容器
+            已停止或 Prometheus 設定有誤——此時服務與 CI 告警都不會再觸發。
